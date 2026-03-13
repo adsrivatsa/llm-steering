@@ -209,10 +209,116 @@ class MoELLM:
         return expert_counts, total_tokens
 
 
+class GPT20MoELLM(MoELLM):
+    """
+    MoE LLM wrapper specialized for `openai/gpt-oss-20b`.
+
+    GPT-OSS exposes router activations as a tuple:
+        (router_logits, router_indices)
+    on `layer.mlp.router`, with `router_indices` already containing the
+    top-k expert indices per token.
+    """
+
+    def __init__(self, model_name: ModelName) -> None:
+        if model_name != "openai/gpt-oss-20b":
+            raise ValueError("GPT20MoELLM only supports 'openai/gpt-oss-20b'")
+
+        self.model_name: ModelName = model_name
+        self.tokenizer: PreTrainedTokenizerBase = get_tokenizer(model_name)
+
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            device_map=None,
+        )
+        self.model.to(device)
+        self.model.eval()
+
+        # Use architecture-known values from MOE_CONFIG.
+        k_paper, num_experts_paper = MOE_CONFIG[model_name]
+        # Total experts per layer from paper; assume matches implementation.
+        self.num_experts = int(num_experts_paper)
+        self.k = int(k_paper)
+        self.num_layers = len(self.model.model.layers)
+
+    def collect_expert_activation_counts(
+        self,
+        prompts: List[str],
+    ) -> Tuple[torch.Tensor, int]:
+        """
+        Collect expert activation counts using GPT-OSS router hooks.
+
+        We register a hook on each layer's `mlp.router`, which returns:
+            (router_logits, router_indices)
+        where `router_indices` has shape (batch, seq, k).
+        """
+        num_layers = self.num_layers
+        num_experts = self.num_experts
+
+        expert_counts = torch.zeros(num_layers, num_experts, dtype=torch.long)
+        total_tokens = 0
+
+        hooks = []
+
+        def make_router_hook(layer_idx: int):
+            def hook(module, inputs, output):
+                nonlocal expert_counts, total_tokens
+
+                # GPT-OSS router output: (router_logits, router_indices)
+                if not (isinstance(output, tuple) and len(output) == 2):
+                    return
+                router_logits, router_indices = output
+
+                if not isinstance(router_indices, torch.Tensor):
+                    return
+
+                # router_indices: (batch, seq, k)
+                if router_indices.dim() != 3:
+                    return
+
+                b, s, k = router_indices.shape
+                selected_experts = router_indices.reshape(-1)  # (batch * seq * k,)
+
+                counts = torch.bincount(
+                    selected_experts.to(torch.long),
+                    minlength=num_experts,
+                )  # (num_experts,)
+                expert_counts[layer_idx] += counts.to(expert_counts.device)
+
+                total_tokens += b * s
+
+            return hook
+
+        # Register hooks on each layer's router.
+        for i, layer in enumerate(self.model.model.layers):
+            h = layer.mlp.router.register_forward_hook(make_router_hook(i))
+            hooks.append(h)
+
+        with torch.inference_mode():
+            for prompt in tqdm(
+                prompts, desc="Running MoE inference (openai/gpt-oss-20b)"
+            ):
+                text = prompt
+                encoded = self.tokenizer(
+                    text,
+                    return_tensors="pt",
+                    add_special_tokens=True,
+                )
+                encoded = {k: v.to(self.model.device) for k, v in encoded.items()}
+                _ = self.model(**encoded)
+
+        for h in hooks:
+            h.remove()
+
+        return expert_counts, total_tokens
+
+
 def get_moe_llm(model_name: ModelName) -> MoELLM:
     """
     Factory to obtain a MoELLM wrapper for the given model.
     """
-    # For now, all supported models share the same implementation.
-    # If needed, dispatch on model_name to specific subclasses here.
+    if model_name == "openai/gpt-oss-20b":
+        return GPT20MoELLM(model_name=model_name)
+
+    # Fallback: generic implementation (may not work for all architectures).
     return MoELLM(model_name=model_name)

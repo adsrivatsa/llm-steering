@@ -87,7 +87,7 @@ def build_token_frequency_table(
 
 def main():
     dataset_name: DatasetName = "squad"
-    model_name: ModelName = "Qwen/Qwen3-30B-A3B"
+    model_name: ModelName = "openai/gpt-oss-20b"
 
     # n_unique = count_unique_tokens(
     #     dataset_name=dataset_name, model_name=model_name, split="train"
