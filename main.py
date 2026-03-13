@@ -88,21 +88,19 @@ def build_token_frequency_table(
 
 
 def main(dataset_name: DatasetName, model_name: ModelName) -> None:
-    # n_unique = count_unique_tokens(
-    #     dataset_name=dataset_name, model_name=model_name, split="train"
-    # )
-    # index_to_token_id, token_id_to_index = build_token_index_lookup(
-    #     dataset_name=dataset_name, model_name=model_name, split="train"
-    # )
-    # freq_table = build_token_frequency_table(
-    #     dataset_name=dataset_name, model_name=model_name, split="train"
-    # )
+    # Build the token index lookup once and pass the mapping from
+    # token_id -> local index into the SteerMoE computation so we can
+    # track expert activations at the (expert, token) level.
+    _, token_id_to_index = build_token_index_lookup(
+        dataset_name=dataset_name, model_name=model_name, split="train"
+    )
 
     # Example: compute risk-difference matrix for the 'faithfulness' task.
     risk_diff = get_steermoe_activations(
         dataset_name=dataset_name,
         task="faithfulness",
         model_name=model_name,
+        token_id_to_index=token_id_to_index,
     )
 
     # Convert risk difference (delta) matrix into epsilon matrix using a scalar eps.
