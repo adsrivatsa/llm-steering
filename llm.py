@@ -65,10 +65,9 @@ class MoELLM:
 
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-            device_map=None,
+            dtype=torch.float16 if device == "cuda" else torch.float32,
+            device_map="auto",
         )
-        self.model.to(device)
         self.model.eval()
 
         self.gate_modules = self._get_moe_gate_modules()
@@ -199,7 +198,8 @@ class MoELLM:
                     return_tensors="pt",
                     add_special_tokens=True,
                 )
-                encoded = {k: v.to(self.model.device) for k, v in encoded.items()}
+                # With device_map="auto", inputs can stay on CPU and Accelerate
+                # will handle moving them to the right shards.
                 _ = self.model(**encoded)
 
         # Clean up hooks.
@@ -228,10 +228,9 @@ class GPT20MoELLM(MoELLM):
 
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-            device_map=None,
+            dtype=torch.float16 if device == "cuda" else torch.float32,
+            device_map="auto",
         )
-        self.model.to(device)
         self.model.eval()
 
         # Use architecture-known values from MOE_CONFIG.
@@ -264,20 +263,24 @@ class GPT20MoELLM(MoELLM):
             def hook(module, inputs, output):
                 nonlocal expert_counts, total_tokens
 
-                # GPT-OSS router output: (router_logits, router_indices)
-                if not (isinstance(output, tuple) and len(output) == 2):
-                    return
-                router_logits, router_indices = output
-
-                if not isinstance(router_indices, torch.Tensor):
-                    return
-
-                # router_indices: (batch, seq, k)
-                if router_indices.dim() != 3:
+                # HF MoE router returns a tuple of three tensors:
+                # (logits, indices, scores). We know from inspection that
+                # the second tensor (output[1]) contains the top-k expert
+                # indices with shape (tokens, k).
+                if not (isinstance(output, tuple) and len(output) >= 2):
                     return
 
-                b, s, k = router_indices.shape
-                selected_experts = router_indices.reshape(-1)  # (batch * seq * k,)
+                router_indices = output[1]
+                if (
+                    not isinstance(router_indices, torch.Tensor)
+                    or router_indices.dim() != 2
+                ):
+                    return
+
+                tokens, k = router_indices.shape
+                if k <= 0 or k > num_experts:
+                    return
+                selected_experts = router_indices.reshape(-1)  # (tokens * k,)
 
                 counts = torch.bincount(
                     selected_experts.to(torch.long),
@@ -285,11 +288,11 @@ class GPT20MoELLM(MoELLM):
                 )  # (num_experts,)
                 expert_counts[layer_idx] += counts.to(expert_counts.device)
 
-                total_tokens += b * s
+                total_tokens += tokens
 
             return hook
 
-        # Register hooks on each layer's router.
+        # Register hooks on each layer's router module.
         for i, layer in enumerate(self.model.model.layers):
             h = layer.mlp.router.register_forward_hook(make_router_hook(i))
             hooks.append(h)
@@ -304,7 +307,6 @@ class GPT20MoELLM(MoELLM):
                     return_tensors="pt",
                     add_special_tokens=True,
                 )
-                encoded = {k: v.to(self.model.device) for k, v in encoded.items()}
                 _ = self.model(**encoded)
 
         for h in hooks:
