@@ -138,9 +138,12 @@ class GPT20MoELLM:
                 if current_token_indices.numel() != tokens:
                     return
 
+                # Move token indices onto the same device as router_indices.
+                local_token_indices = current_token_indices.to(router_indices.device)
+
                 # Vectorized accumulation of counts per (expert, token_index).
                 # Expand token indices to align with router_indices (tokens, k).
-                token_idx_expanded = current_token_indices.view(-1, 1).expand_as(
+                token_idx_expanded = local_token_indices.view(-1, 1).expand_as(
                     router_indices
                 )
                 # Mask out invalid token indices (< 0).
@@ -281,8 +284,11 @@ class Qwen30MoELLM:
                 if current_token_indices.numel() != tokens:
                     return
 
+                # Move token indices onto the same device as router_indices.
+                local_token_indices = current_token_indices.to(router_indices.device)
+
                 # Vectorized accumulation of counts per (expert, token_index).
-                token_idx_expanded = current_token_indices.view(-1, 1).expand_as(
+                token_idx_expanded = local_token_indices.view(-1, 1).expand_as(
                     router_indices
                 )
                 valid = token_idx_expanded >= 0
