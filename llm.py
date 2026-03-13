@@ -106,6 +106,18 @@ class GPT20MoELLM:
         # token_counts[token_index] = number of times this token appears
         token_counts = torch.zeros(num_token_indices, dtype=torch.long)
 
+        # Dense lookup table from tokenizer vocab id -> local token index.
+        vocab_size = self.tokenizer.vocab_size
+        id_to_index = torch.full(
+            (vocab_size,),
+            -1,
+            dtype=torch.long,
+            device=self.model.device,
+        )
+        for tid, idx in token_id_to_index.items():
+            if 0 <= tid < vocab_size:
+                id_to_index[tid] = int(idx)
+
         hooks = []
         current_token_indices: torch.Tensor | None = None
 
@@ -183,16 +195,13 @@ class GPT20MoELLM:
                     return_tensors="pt",
                     add_special_tokens=True,
                 )
+                # Move encoded inputs to the model device.
+                encoded = {k: v.to(self.model.device) for k, v in encoded.items()}
 
-                # Track which local token index each position maps to.
-                input_ids = encoded["input_ids"][0]
-                indices: list[int] = []
-                for tid in input_ids.tolist():
-                    idx = token_id_to_index.get(int(tid), -1)
-                    indices.append(idx)
-                current_token_indices = torch.tensor(
-                    indices, dtype=torch.long, device=self.model.device
-                )
+                # Track which local token index each position maps to using
+                # the dense lookup table.
+                input_ids = encoded["input_ids"][0]  # (tokens,)
+                current_token_indices = id_to_index[input_ids]
 
                 # Update per-token occurrence counts (independent of layer).
                 for idx in current_token_indices.tolist():
@@ -252,6 +261,18 @@ class Qwen30MoELLM:
         )
         # token_counts[token_index] = number of times this token appears
         token_counts = torch.zeros(num_token_indices, dtype=torch.long)
+
+        # Dense lookup table from tokenizer vocab id -> local token index.
+        vocab_size = self.tokenizer.vocab_size
+        id_to_index = torch.full(
+            (vocab_size,),
+            -1,
+            dtype=torch.long,
+            device=self.model.device,
+        )
+        for tid, idx in token_id_to_index.items():
+            if 0 <= tid < vocab_size:
+                id_to_index[tid] = int(idx)
 
         hooks = []
         current_token_indices: torch.Tensor | None = None
@@ -325,15 +346,13 @@ class Qwen30MoELLM:
                     return_tensors="pt",
                     add_special_tokens=True,
                 )
-                # Track which local token index each position maps to.
-                input_ids = encoded["input_ids"][0]
-                indices: list[int] = []
-                for tid in input_ids.tolist():
-                    idx = token_id_to_index.get(int(tid), -1)
-                    indices.append(idx)
-                current_token_indices = torch.tensor(
-                    indices, dtype=torch.long, device=self.model.device
-                )
+                # Move encoded inputs to the model device.
+                encoded = {k: v.to(self.model.device) for k, v in encoded.items()}
+
+                # Track which local token index each position maps to using
+                # the dense lookup table.
+                input_ids = encoded["input_ids"][0]  # (tokens,)
+                current_token_indices = id_to_index[input_ids]
 
                 # Update per-token occurrence counts (independent of layer).
                 for idx in current_token_indices.tolist():
