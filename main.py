@@ -1,5 +1,7 @@
 from collections import Counter
 import os
+import argparse
+
 import torch
 from tqdm.auto import tqdm
 from faithfulness import FaithfulnessDataset, DatasetName
@@ -85,10 +87,7 @@ def build_token_frequency_table(
     return dict(counter)
 
 
-def main():
-    dataset_name: DatasetName = "squad"
-    model_name: ModelName = "openai/gpt-oss-20b"
-
+def main(dataset_name: DatasetName, model_name: ModelName) -> None:
     # n_unique = count_unique_tokens(
     #     dataset_name=dataset_name, model_name=model_name, split="train"
     # )
@@ -127,4 +126,26 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(
+        description="Compute and save SteerMoE activations (epsilon and delta matrices)."
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="squad",
+        help="Dataset name (currently only 'squad' is supported).",
+    )
+    parser.add_argument(
+        "--llm",
+        "--model",
+        dest="model_name",
+        type=str,
+        default="openai/gpt-oss-20b",
+        help="Hugging Face model identifier for the MoE LLM.",
+    )
+
+    args = parser.parse_args()
+    dataset_name: DatasetName = args.dataset  # type: ignore[assignment]
+    model_name: ModelName = args.model_name  # type: ignore[assignment]
+
+    main(dataset_name=dataset_name, model_name=model_name)
