@@ -82,25 +82,36 @@ class GPT20MoELLM:
     def collect_expert_activation_counts(
         self,
         prompts: List[str],
-    ) -> Tuple[torch.Tensor, int]:
+        token_id_to_index: dict[int, int],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Collect expert activation counts using GPT-OSS router hooks.
 
         We register a hook on each layer's `mlp.router`, which returns:
             (router_logits, router_indices)
-        where `router_indices` has shape (batch, seq, k).
+        where `router_indices` has shape (tokens, k).
+
+        Instead of aggregating only over experts, we record counts per
+        (expert, token_index) pair, where `token_index` is a dense local
+        index derived from `token_id_to_index`.
         """
         num_layers = self.num_layers
         num_experts = self.num_experts
+        num_token_indices = len(token_id_to_index)
 
-        expert_counts = torch.zeros(num_layers, num_experts, dtype=torch.long)
-        total_tokens = 0
+        # expert_counts_by_token[layer, expert, token_index] = count
+        expert_counts_by_token = torch.zeros(
+            num_layers, num_experts, num_token_indices, dtype=torch.long
+        )
+        # token_counts[token_index] = number of times this token appears
+        token_counts = torch.zeros(num_token_indices, dtype=torch.long)
 
         hooks = []
+        current_token_indices: torch.Tensor | None = None
 
         def make_router_hook(layer_idx: int):
             def hook(module, inputs, output):
-                nonlocal expert_counts, total_tokens
+                nonlocal expert_counts_by_token, current_token_indices
 
                 # HF MoE router returns a tuple of three tensors:
                 # (logits, scores, indices). From inspection, the third tensor
@@ -120,14 +131,21 @@ class GPT20MoELLM:
                 if k <= 0 or k > num_experts:
                     return
 
-                selected_experts = router_indices.reshape(-1)  # (tokens * k,)
-                counts = torch.bincount(
-                    selected_experts.to(torch.long),
-                    minlength=num_experts,
-                )  # (num_experts,)
-                expert_counts[layer_idx] += counts.to(expert_counts.device)
+                # `current_token_indices` is a 1D tensor of length `tokens`
+                # giving the local token_index for each token position.
+                if current_token_indices is None:
+                    return
+                if current_token_indices.numel() != tokens:
+                    return
 
-                total_tokens += tokens
+                for t in range(tokens):
+                    token_idx = int(current_token_indices[t].item())
+                    if token_idx < 0 or token_idx >= num_token_indices:
+                        continue
+                    for e in router_indices[t]:
+                        e_int = int(e.item())
+                        if 0 <= e_int < num_experts:
+                            expert_counts_by_token[layer_idx, e_int, token_idx] += 1
 
             return hook
 
@@ -146,12 +164,28 @@ class GPT20MoELLM:
                     return_tensors="pt",
                     add_special_tokens=True,
                 )
+
+                # Track which local token index each position maps to.
+                input_ids = encoded["input_ids"][0]
+                indices: list[int] = []
+                for tid in input_ids.tolist():
+                    idx = token_id_to_index.get(int(tid), -1)
+                    indices.append(idx)
+                current_token_indices = torch.tensor(
+                    indices, dtype=torch.long, device=self.model.device
+                )
+
+                # Update per-token occurrence counts (independent of layer).
+                for idx in current_token_indices.tolist():
+                    if 0 <= idx < num_token_indices:
+                        token_counts[idx] += 1
+
                 _ = self.model(**encoded)
 
         for h in hooks:
             h.remove()
 
-        return expert_counts, total_tokens
+        return expert_counts_by_token, token_counts
 
 
 class Qwen30MoELLM:
@@ -187,18 +221,25 @@ class Qwen30MoELLM:
     def collect_expert_activation_counts(
         self,
         prompts: List[str],
-    ) -> Tuple[torch.Tensor, int]:
+        token_id_to_index: dict[int, int],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         num_layers = self.num_layers
         num_experts = self.num_experts
+        num_token_indices = len(token_id_to_index)
 
-        expert_counts = torch.zeros(num_layers, num_experts, dtype=torch.long)
-        total_tokens = 0
+        # expert_counts_by_token[layer, expert, token_index] = count
+        expert_counts_by_token = torch.zeros(
+            num_layers, num_experts, num_token_indices, dtype=torch.long
+        )
+        # token_counts[token_index] = number of times this token appears
+        token_counts = torch.zeros(num_token_indices, dtype=torch.long)
 
         hooks = []
+        current_token_indices: torch.Tensor | None = None
 
         def make_router_hook(layer_idx: int):
             def hook(module, inputs, output):
-                nonlocal expert_counts, total_tokens
+                nonlocal expert_counts_by_token, current_token_indices
 
                 # HF MoE router returns a tuple of three tensors:
                 # (logits, scores, indices). We know from inspection that
@@ -217,15 +258,21 @@ class Qwen30MoELLM:
                 tokens, k = router_indices.shape
                 if k <= 0 or k > num_experts:
                     return
+                # `current_token_indices` is a 1D tensor of length `tokens`
+                # giving the local token_index for each token position.
+                if current_token_indices is None:
+                    return
+                if current_token_indices.numel() != tokens:
+                    return
 
-                selected_experts = router_indices.reshape(-1)  # (tokens * k,)
-                counts = torch.bincount(
-                    selected_experts.to(torch.long),
-                    minlength=num_experts,
-                )  # (num_experts,)
-                expert_counts[layer_idx] += counts.to(expert_counts.device)
-
-                total_tokens += tokens
+                for t in range(tokens):
+                    token_idx = int(current_token_indices[t].item())
+                    if token_idx < 0 or token_idx >= num_token_indices:
+                        continue
+                    for e in router_indices[t]:
+                        e_int = int(e.item())
+                        if 0 <= e_int < num_experts:
+                            expert_counts_by_token[layer_idx, e_int, token_idx] += 1
 
             return hook
 
@@ -243,12 +290,27 @@ class Qwen30MoELLM:
                     return_tensors="pt",
                     add_special_tokens=True,
                 )
+                # Track which local token index each position maps to.
+                input_ids = encoded["input_ids"][0]
+                indices: list[int] = []
+                for tid in input_ids.tolist():
+                    idx = token_id_to_index.get(int(tid), -1)
+                    indices.append(idx)
+                current_token_indices = torch.tensor(
+                    indices, dtype=torch.long, device=self.model.device
+                )
+
+                # Update per-token occurrence counts (independent of layer).
+                for idx in current_token_indices.tolist():
+                    if 0 <= idx < num_token_indices:
+                        token_counts[idx] += 1
+
                 _ = self.model(**encoded)
 
         for h in hooks:
             h.remove()
 
-        return expert_counts, total_tokens
+        return expert_counts_by_token, token_counts
 
 
 def get_moe_llm(model_name: ModelName):
