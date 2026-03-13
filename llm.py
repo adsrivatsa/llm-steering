@@ -138,14 +138,30 @@ class GPT20MoELLM:
                 if current_token_indices.numel() != tokens:
                     return
 
-                for t in range(tokens):
-                    token_idx = int(current_token_indices[t].item())
-                    if token_idx < 0 or token_idx >= num_token_indices:
-                        continue
-                    for e in router_indices[t]:
-                        e_int = int(e.item())
-                        if 0 <= e_int < num_experts:
-                            expert_counts_by_token[layer_idx, e_int, token_idx] += 1
+                # Vectorized accumulation of counts per (expert, token_index).
+                # Expand token indices to align with router_indices (tokens, k).
+                token_idx_expanded = current_token_indices.view(-1, 1).expand_as(
+                    router_indices
+                )
+                # Mask out invalid token indices (< 0).
+                valid = token_idx_expanded >= 0
+                if not torch.any(valid):
+                    return
+
+                expert_flat = router_indices[valid].to(torch.long)
+                token_idx_flat = token_idx_expanded[valid].to(torch.long)
+
+                # Encode (expert, token_index) pairs into a single id and bincount.
+                pair_ids = expert_flat * num_token_indices + token_idx_flat
+                pair_counts = torch.bincount(
+                    pair_ids,
+                    minlength=num_experts * num_token_indices,
+                )
+                expert_token_counts = pair_counts.view(num_experts, num_token_indices)
+
+                expert_counts_by_token[layer_idx] += expert_token_counts.to(
+                    expert_counts_by_token.device
+                )
 
             return hook
 
@@ -265,14 +281,27 @@ class Qwen30MoELLM:
                 if current_token_indices.numel() != tokens:
                     return
 
-                for t in range(tokens):
-                    token_idx = int(current_token_indices[t].item())
-                    if token_idx < 0 or token_idx >= num_token_indices:
-                        continue
-                    for e in router_indices[t]:
-                        e_int = int(e.item())
-                        if 0 <= e_int < num_experts:
-                            expert_counts_by_token[layer_idx, e_int, token_idx] += 1
+                # Vectorized accumulation of counts per (expert, token_index).
+                token_idx_expanded = current_token_indices.view(-1, 1).expand_as(
+                    router_indices
+                )
+                valid = token_idx_expanded >= 0
+                if not torch.any(valid):
+                    return
+
+                expert_flat = router_indices[valid].to(torch.long)
+                token_idx_flat = token_idx_expanded[valid].to(torch.long)
+
+                pair_ids = expert_flat * num_token_indices + token_idx_flat
+                pair_counts = torch.bincount(
+                    pair_ids,
+                    minlength=num_experts * num_token_indices,
+                )
+                expert_token_counts = pair_counts.view(num_experts, num_token_indices)
+
+                expert_counts_by_token[layer_idx] += expert_token_counts.to(
+                    expert_counts_by_token.device
+                )
 
             return hook
 
