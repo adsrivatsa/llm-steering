@@ -6,7 +6,7 @@ import torch
 from tqdm.auto import tqdm
 
 from faithfulness import FaithfulnessDataset
-from llm import ModelName, MoELLM, get_moe_llm
+from llm import ModelName, get_moe_llm
 
 
 TaskName = Literal["faithfulness"]
@@ -27,7 +27,7 @@ def _collect_expert_activation_counts(
                       token appears across all prompts.
     """
 
-    moe_model: MoELLM = get_moe_llm(model_name)
+    moe_model = get_moe_llm(model_name)
     return moe_model.collect_expert_activation_counts(prompts, token_id_to_index)
 
 
