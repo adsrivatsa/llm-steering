@@ -66,7 +66,10 @@ def save_collection_checkpoint(
         "dataset_name": dataset_name,
         "model_name": model_name,
     }
-    torch.save(state, path)
+    # Write to a temp file then rename so we never leave a corrupted checkpoint.
+    tmp_path = path + ".tmp"
+    torch.save(state, tmp_path)
+    os.replace(tmp_path, path)
     return path
 
 
@@ -84,7 +87,15 @@ def load_collection_checkpoint(
     path = _collection_checkpoint_path(checkpoint_dir, dataset_name, model_name, pass_name)
     if not os.path.isfile(path):
         return None
-    state = torch.load(path, map_location="cpu", weights_only=True)
+    try:
+        state = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception:
+        # Corrupted checkpoint (e.g. interrupted during save); remove and start fresh.
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return None
     expert_counts = state["expert_counts_by_token"]
     token_counts = state["token_counts"]
     if device is not None:
