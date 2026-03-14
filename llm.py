@@ -83,10 +83,10 @@ def _collect_expert_activation_counts_impl(
     )
     token_counts = torch.zeros(num_token_indices, dtype=torch.long)
 
-    model_device = getattr(model, "device", next(model.parameters()).device)
+    # Keep lookup on CPU so we don't assume a single device; model uses device_map="auto".
     vocab_size = tokenizer.vocab_size
     id_to_index = torch.full(
-        (vocab_size,), -1, dtype=torch.long, device=model_device
+        (vocab_size,), -1, dtype=torch.long, device="cpu"
     )
     for tid, idx in token_id_to_index.items():
         if 0 <= tid < vocab_size:
@@ -115,7 +115,7 @@ def _collect_expert_activation_counts_impl(
                 return_tensors="pt",
                 add_special_tokens=True,
             )
-            encoded = {k: v.to(model_device) for k, v in encoded.items()}
+            # Leave encoded on CPU; model with device_map="auto" moves inputs per block.
             input_ids = encoded["input_ids"][0]
             current_token_indices_ref[0] = id_to_index[input_ids]
             for idx in current_token_indices_ref[0].tolist():
