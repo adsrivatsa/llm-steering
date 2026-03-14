@@ -1,10 +1,131 @@
-from typing import Literal, List, Tuple
+from typing import Callable, Literal, List, Tuple
 
 import torch
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
 
 from device import device
+
+
+def make_expert_token_router_hook(
+    layer_idx: int,
+    expert_counts_by_token: torch.Tensor,
+    current_token_indices_ref: List[torch.Tensor | None],
+    num_experts: int,
+    num_token_indices: int,
+    router_indices_output_index: int = 2,
+    min_output_len: int | None = None,
+) -> Callable[..., None]:
+    """
+    Returns a forward hook that updates expert_counts_by_token[layer_idx] from
+    the router's output (output[router_indices_output_index] = router_indices
+    with shape (tokens, k)). The caller must set current_token_indices_ref[0]
+    to the per-position token index tensor before each forward.
+    """
+    if min_output_len is None:
+        min_output_len = router_indices_output_index + 1
+
+    def hook(module: torch.nn.Module, inputs: Tuple, output: Tuple) -> None:
+        if not (isinstance(output, tuple) and len(output) >= min_output_len):
+            return
+        router_indices = output[router_indices_output_index]
+        if not isinstance(router_indices, torch.Tensor) or router_indices.dim() != 2:
+            return
+        tokens, k = router_indices.shape
+        if k <= 0 or k > num_experts:
+            return
+
+        current_token_indices = current_token_indices_ref[0]
+        if current_token_indices is None or current_token_indices.numel() != tokens:
+            return
+
+        local_token_indices = current_token_indices.to(router_indices.device)
+        token_idx_expanded = local_token_indices.view(-1, 1).expand_as(router_indices)
+        valid = token_idx_expanded >= 0
+        if not torch.any(valid):
+            return
+
+        expert_flat = router_indices[valid].to(torch.long)
+        token_idx_flat = token_idx_expanded[valid].to(torch.long)
+        pair_ids = expert_flat * num_token_indices + token_idx_flat
+        pair_counts = torch.bincount(
+            pair_ids,
+            minlength=num_experts * num_token_indices,
+        )
+        expert_token_counts = pair_counts.view(num_experts, num_token_indices)
+        expert_counts_by_token[layer_idx] += expert_token_counts.to(
+            expert_counts_by_token.device
+        )
+
+    return hook
+
+
+def _collect_expert_activation_counts_impl(
+    model: torch.nn.Module,
+    tokenizer: PreTrainedTokenizerBase,
+    layers: List[torch.nn.Module],
+    prompts: List[str],
+    token_id_to_index: dict[int, int],
+    num_experts: int,
+    get_router_module: Callable[[torch.nn.Module], torch.nn.Module],
+    router_indices_output_index: int = 2,
+    desc: str = "Running MoE inference",
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Generic implementation: run the model on prompts and collect per (layer, expert,
+    token_index) activation counts. get_router_module(layer) should return the
+    router submodule to hook (e.g. layer.mlp.router or layer.mlp.gate).
+    """
+    num_layers = len(layers)
+    num_token_indices = len(token_id_to_index)
+    expert_counts_by_token = torch.zeros(
+        num_layers, num_experts, num_token_indices, dtype=torch.long
+    )
+    token_counts = torch.zeros(num_token_indices, dtype=torch.long)
+
+    model_device = getattr(model, "device", next(model.parameters()).device)
+    vocab_size = tokenizer.vocab_size
+    id_to_index = torch.full(
+        (vocab_size,), -1, dtype=torch.long, device=model_device
+    )
+    for tid, idx in token_id_to_index.items():
+        if 0 <= tid < vocab_size:
+            id_to_index[tid] = int(idx)
+
+    hooks = []
+    current_token_indices_ref: List[torch.Tensor | None] = [None]
+    for i, layer in enumerate(layers):
+        router_module = get_router_module(layer)
+        h = router_module.register_forward_hook(
+            make_expert_token_router_hook(
+                layer_idx=i,
+                expert_counts_by_token=expert_counts_by_token,
+                current_token_indices_ref=current_token_indices_ref,
+                num_experts=num_experts,
+                num_token_indices=num_token_indices,
+                router_indices_output_index=router_indices_output_index,
+            )
+        )
+        hooks.append(h)
+
+    with torch.inference_mode():
+        for prompt in tqdm(prompts, desc=desc):
+            encoded = tokenizer(
+                prompt,
+                return_tensors="pt",
+                add_special_tokens=True,
+            )
+            encoded = {k: v.to(model_device) for k, v in encoded.items()}
+            input_ids = encoded["input_ids"][0]
+            current_token_indices_ref[0] = id_to_index[input_ids]
+            for idx in current_token_indices_ref[0].tolist():
+                if 0 <= idx < num_token_indices:
+                    token_counts[idx] += 1
+            _ = model(**encoded)
+
+    for h in hooks:
+        h.remove()
+    return expert_counts_by_token, token_counts
 
 
 ModelName = Literal[
@@ -33,21 +154,6 @@ MOE_CONFIG: dict[ModelName, Tuple[int, int]] = {
 }
 
 
-def get_tokenizer(model_name: ModelName) -> PreTrainedTokenizerBase:
-    """
-    Return the *actual* tokenizer used by the specified model.
-
-    This uses Hugging Face `transformers.AutoTokenizer` under the hood, so
-    `model_name` must correspond to a valid pretrained model identifier or
-    local path.
-    """
-    return AutoTokenizer.from_pretrained(
-        model_name,
-        use_fast=True,
-        trust_remote_code=True,
-    )
-
-
 class GPT20MoELLM:
     """
     MoE LLM wrapper specialized for `openai/gpt-oss-20b`.
@@ -63,7 +169,11 @@ class GPT20MoELLM:
             raise ValueError("GPT20MoELLM only supports 'openai/gpt-oss-20b'")
 
         self.model_name: ModelName = model_name
-        self.tokenizer: PreTrainedTokenizerBase = get_tokenizer(model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_name,
+            use_fast=True,
+            trust_remote_code=True,
+        )
 
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
@@ -84,136 +194,18 @@ class GPT20MoELLM:
         prompts: List[str],
         token_id_to_index: dict[int, int],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Collect expert activation counts using GPT-OSS router hooks.
-
-        We register a hook on each layer's `mlp.router`, which returns:
-            (router_logits, router_indices)
-        where `router_indices` has shape (tokens, k).
-
-        Instead of aggregating only over experts, we record counts per
-        (expert, token_index) pair, where `token_index` is a dense local
-        index derived from `token_id_to_index`.
-        """
-        num_layers = self.num_layers
-        num_experts = self.num_experts
-        num_token_indices = len(token_id_to_index)
-
-        # expert_counts_by_token[layer, expert, token_index] = count
-        expert_counts_by_token = torch.zeros(
-            num_layers, num_experts, num_token_indices, dtype=torch.long
+        """Collect expert activation counts using GPT-OSS router hooks."""
+        return _collect_expert_activation_counts_impl(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            layers=list(self.model.model.layers),
+            prompts=prompts,
+            token_id_to_index=token_id_to_index,
+            num_experts=self.num_experts,
+            get_router_module=lambda layer: layer.mlp.router,
+            router_indices_output_index=2,
+            desc=f"Running MoE inference ({self.model_name})",
         )
-        # token_counts[token_index] = number of times this token appears
-        token_counts = torch.zeros(num_token_indices, dtype=torch.long)
-
-        # Dense lookup table from tokenizer vocab id -> local token index.
-        vocab_size = self.tokenizer.vocab_size
-        id_to_index = torch.full(
-            (vocab_size,),
-            -1,
-            dtype=torch.long,
-            device=self.model.device,
-        )
-        for tid, idx in token_id_to_index.items():
-            if 0 <= tid < vocab_size:
-                id_to_index[tid] = int(idx)
-
-        hooks = []
-        current_token_indices: torch.Tensor | None = None
-
-        def make_router_hook(layer_idx: int):
-            def hook(module, inputs, output):
-                nonlocal expert_counts_by_token, current_token_indices
-
-                # HF MoE router returns a tuple of three tensors:
-                # (logits, scores, indices). From inspection, the third tensor
-                # (output[2]) contains the top-k expert indices with shape
-                # (tokens, k).
-                if not (isinstance(output, tuple) and len(output) >= 3):
-                    return
-
-                router_indices = output[2]
-                if (
-                    not isinstance(router_indices, torch.Tensor)
-                    or router_indices.dim() != 2
-                ):
-                    return
-
-                tokens, k = router_indices.shape
-                if k <= 0 or k > num_experts:
-                    return
-
-                # `current_token_indices` is a 1D tensor of length `tokens`
-                # giving the local token_index for each token position.
-                if current_token_indices is None:
-                    return
-                if current_token_indices.numel() != tokens:
-                    return
-
-                # Move token indices onto the same device as router_indices.
-                local_token_indices = current_token_indices.to(router_indices.device)
-
-                # Vectorized accumulation of counts per (expert, token_index).
-                # Expand token indices to align with router_indices (tokens, k).
-                token_idx_expanded = local_token_indices.view(-1, 1).expand_as(
-                    router_indices
-                )
-                # Mask out invalid token indices (< 0).
-                valid = token_idx_expanded >= 0
-                if not torch.any(valid):
-                    return
-
-                expert_flat = router_indices[valid].to(torch.long)
-                token_idx_flat = token_idx_expanded[valid].to(torch.long)
-
-                # Encode (expert, token_index) pairs into a single id and bincount.
-                pair_ids = expert_flat * num_token_indices + token_idx_flat
-                pair_counts = torch.bincount(
-                    pair_ids,
-                    minlength=num_experts * num_token_indices,
-                )
-                expert_token_counts = pair_counts.view(num_experts, num_token_indices)
-
-                expert_counts_by_token[layer_idx] += expert_token_counts.to(
-                    expert_counts_by_token.device
-                )
-
-            return hook
-
-        # Register hooks on each layer's router module.
-        for i, layer in enumerate(self.model.model.layers):
-            h = layer.mlp.router.register_forward_hook(make_router_hook(i))
-            hooks.append(h)
-
-        with torch.inference_mode():
-            for prompt in tqdm(
-                prompts, desc=f"Running MoE inference ({self.model_name})"
-            ):
-                text = prompt
-                encoded = self.tokenizer(
-                    text,
-                    return_tensors="pt",
-                    add_special_tokens=True,
-                )
-                # Move encoded inputs to the model device.
-                encoded = {k: v.to(self.model.device) for k, v in encoded.items()}
-
-                # Track which local token index each position maps to using
-                # the dense lookup table.
-                input_ids = encoded["input_ids"][0]  # (tokens,)
-                current_token_indices = id_to_index[input_ids]
-
-                # Update per-token occurrence counts (independent of layer).
-                for idx in current_token_indices.tolist():
-                    if 0 <= idx < num_token_indices:
-                        token_counts[idx] += 1
-
-                _ = self.model(**encoded)
-
-        for h in hooks:
-            h.remove()
-
-        return expert_counts_by_token, token_counts
 
 
 class Qwen30MoELLM:
@@ -230,7 +222,11 @@ class Qwen30MoELLM:
             raise ValueError("Qwen30MoELLM only supports 'Qwen/Qwen3-30B-A3B'")
 
         self.model_name: ModelName = model_name
-        self.tokenizer: PreTrainedTokenizerBase = get_tokenizer(model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_name,
+            use_fast=True,
+            trust_remote_code=True,
+        )
 
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
@@ -251,120 +247,18 @@ class Qwen30MoELLM:
         prompts: List[str],
         token_id_to_index: dict[int, int],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        num_layers = self.num_layers
-        num_experts = self.num_experts
-        num_token_indices = len(token_id_to_index)
-
-        # expert_counts_by_token[layer, expert, token_index] = count
-        expert_counts_by_token = torch.zeros(
-            num_layers, num_experts, num_token_indices, dtype=torch.long
+        """Collect expert activation counts using Qwen router (gate) hooks."""
+        return _collect_expert_activation_counts_impl(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            layers=list(self.model.model.layers),
+            prompts=prompts,
+            token_id_to_index=token_id_to_index,
+            num_experts=self.num_experts,
+            get_router_module=lambda layer: layer.mlp.gate,
+            router_indices_output_index=2,
+            desc=f"Running MoE inference ({self.model_name})",
         )
-        # token_counts[token_index] = number of times this token appears
-        token_counts = torch.zeros(num_token_indices, dtype=torch.long)
-
-        # Dense lookup table from tokenizer vocab id -> local token index.
-        vocab_size = self.tokenizer.vocab_size
-        id_to_index = torch.full(
-            (vocab_size,),
-            -1,
-            dtype=torch.long,
-            device=self.model.device,
-        )
-        for tid, idx in token_id_to_index.items():
-            if 0 <= tid < vocab_size:
-                id_to_index[tid] = int(idx)
-
-        hooks = []
-        current_token_indices: torch.Tensor | None = None
-
-        def make_router_hook(layer_idx: int):
-            def hook(module, inputs, output):
-                nonlocal expert_counts_by_token, current_token_indices
-
-                # HF MoE router returns a tuple of three tensors:
-                # (logits, scores, indices). We know from inspection that
-                # the third tensor (output[2]) contains the top-k expert
-                # indices with shape (tokens, k).
-                if not (isinstance(output, tuple) and len(output) >= 2):
-                    return
-
-                router_indices = output[2]
-                if (
-                    not isinstance(router_indices, torch.Tensor)
-                    or router_indices.dim() != 2
-                ):
-                    return
-
-                tokens, k = router_indices.shape
-                if k <= 0 or k > num_experts:
-                    return
-                # `current_token_indices` is a 1D tensor of length `tokens`
-                # giving the local token_index for each token position.
-                if current_token_indices is None:
-                    return
-                if current_token_indices.numel() != tokens:
-                    return
-
-                # Move token indices onto the same device as router_indices.
-                local_token_indices = current_token_indices.to(router_indices.device)
-
-                # Vectorized accumulation of counts per (expert, token_index).
-                token_idx_expanded = local_token_indices.view(-1, 1).expand_as(
-                    router_indices
-                )
-                valid = token_idx_expanded >= 0
-                if not torch.any(valid):
-                    return
-
-                expert_flat = router_indices[valid].to(torch.long)
-                token_idx_flat = token_idx_expanded[valid].to(torch.long)
-
-                pair_ids = expert_flat * num_token_indices + token_idx_flat
-                pair_counts = torch.bincount(
-                    pair_ids,
-                    minlength=num_experts * num_token_indices,
-                )
-                expert_token_counts = pair_counts.view(num_experts, num_token_indices)
-
-                expert_counts_by_token[layer_idx] += expert_token_counts.to(
-                    expert_counts_by_token.device
-                )
-
-            return hook
-
-        for i, layer in enumerate(self.model.model.layers):
-            h = layer.mlp.gate.register_forward_hook(make_router_hook(i))
-            hooks.append(h)
-
-        with torch.inference_mode():
-            for prompt in tqdm(
-                prompts, desc=f"Running MoE inference ({self.model_name})"
-            ):
-                text = prompt
-                encoded = self.tokenizer(
-                    text,
-                    return_tensors="pt",
-                    add_special_tokens=True,
-                )
-                # Move encoded inputs to the model device.
-                encoded = {k: v.to(self.model.device) for k, v in encoded.items()}
-
-                # Track which local token index each position maps to using
-                # the dense lookup table.
-                input_ids = encoded["input_ids"][0]  # (tokens,)
-                current_token_indices = id_to_index[input_ids]
-
-                # Update per-token occurrence counts (independent of layer).
-                for idx in current_token_indices.tolist():
-                    if 0 <= idx < num_token_indices:
-                        token_counts[idx] += 1
-
-                _ = self.model(**encoded)
-
-        for h in hooks:
-            h.remove()
-
-        return expert_counts_by_token, token_counts
 
 
 def get_moe_llm(model_name: ModelName):
