@@ -166,7 +166,7 @@ if __name__ == "__main__":
         "--model",
         dest="model_name",
         type=str,
-        default="openai/gpt-oss-20b",
+        default="mistralai/Mixtral-8x7B-Instruct-v0.1",
         help="Hugging Face model identifier for the MoE LLM.",
     )
     parser.add_argument(
