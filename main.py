@@ -178,7 +178,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--checkpoint-interval",
         type=int,
-        default=10,
+        default=50,
         help="Save a checkpoint every this many prompts (default: 10).",
     )
 
