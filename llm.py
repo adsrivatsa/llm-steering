@@ -497,7 +497,7 @@ class Phi42B:
             prompts=prompts,
             token_id_to_index=token_id_to_index,
             num_experts=self.num_experts,
-            get_router_module=lambda layer: layer.mlp.gate,
+            get_router_module=lambda layer: layer.mlp.router,
             router_indices_output_index=2,
             desc=f"Running MoE inference ({self.model_name})",
             checkpoint_dir=checkpoint_dir,
