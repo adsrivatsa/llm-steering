@@ -5,8 +5,9 @@ import argparse
 import torch
 from tqdm.auto import tqdm
 from faithfulness import FaithfulnessDataset, DatasetName
-from llm import get_tokenizer, ModelName
+from llm import ModelName
 from steermoe import get_steermoe_activations
+from transformers import AutoTokenizer
 
 
 def _collect_unique_token_ids(
@@ -17,7 +18,11 @@ def _collect_unique_token_ids(
     over all (document, question) pairs in the specified dataset split.
     """
     dataset = FaithfulnessDataset(dataset_name=dataset_name, split=split)
-    tokenizer = get_tokenizer(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        use_fast=True,
+        trust_remote_code=True,
+    )
 
     unique_token_ids: set[int] = set()
     for document, question in tqdm(
@@ -73,7 +78,11 @@ def build_token_frequency_table(
     for the given model's tokenizer.
     """
     dataset = FaithfulnessDataset(dataset_name=dataset_name, split=split)
-    tokenizer = get_tokenizer(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        use_fast=True,
+        trust_remote_code=True,
+    )
 
     counter: Counter[int] = Counter()
     for document, question in tqdm(
