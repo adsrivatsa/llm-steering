@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Literal
 
 import torch
@@ -95,6 +96,11 @@ def get_steermoe_activations(
 
     meta = {"dataset_name": dataset_name, "model_name": model_name}
 
+    # Resolve to absolute path so resume works regardless of cwd
+    if checkpoint_dir:
+        checkpoint_dir = os.path.abspath(checkpoint_dir)
+        print(f"Checkpoint directory: {checkpoint_dir}")
+
     resume_x1 = None
     if checkpoint_dir:
         loaded = load_collection_checkpoint(
@@ -103,6 +109,8 @@ def get_steermoe_activations(
         if loaded is not None:
             expert_counts_x1, token_counts_x1, step, _ = loaded
             resume_x1 = (expert_counts_x1, token_counts_x1, step)
+            remaining = len(prompts_x1) - step
+            print(f"Resuming x1 from prompt {step} ({remaining} remaining)")
 
     expert_counts_x1, token_counts_x1 = _collect_expert_activation_counts(
         prompts_x1,
@@ -123,6 +131,8 @@ def get_steermoe_activations(
         if loaded is not None:
             expert_counts_x2, token_counts_x2, step, _ = loaded
             resume_x2 = (expert_counts_x2, token_counts_x2, step)
+            remaining = len(prompts_x2) - step
+            print(f"Resuming x2 from prompt {step} ({remaining} remaining)")
 
     expert_counts_x2, token_counts_x2 = _collect_expert_activation_counts(
         prompts_x2,

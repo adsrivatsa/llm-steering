@@ -172,8 +172,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--checkpoint-dir",
         type=str,
-        default="./checkpoints",
-        help="Directory for collection checkpoints (every N prompts). If set, enables resume.",
+        default="checkpoints",
+        help="Directory for collection checkpoints (every N prompts). Enables save/resume. Use '' to disable.",
     )
     parser.add_argument(
         "--checkpoint-interval",
@@ -186,9 +186,12 @@ if __name__ == "__main__":
     dataset_name: DatasetName = args.dataset  # type: ignore[assignment]
     model_name: ModelName = args.model_name  # type: ignore[assignment]
 
+    # Use default "checkpoints" so resume works; pass --checkpoint-dir '' to disable.
+    checkpoint_dir = args.checkpoint_dir or None
+
     main(
         dataset_name=dataset_name,
         model_name=model_name,
-        checkpoint_dir=args.checkpoint_dir,
+        checkpoint_dir=checkpoint_dir,
         checkpoint_interval=args.checkpoint_interval,
     )
