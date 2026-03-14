@@ -11,6 +11,32 @@ from checkpoint import (
 from device import device
 
 
+ModelName = Literal[
+    # OpenAI GPT-OSS series
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
+    # Qwen3
+    "Qwen/Qwen3-30B-A3B",
+    # Mixtral
+    "mistralai/Mixtral-8x7B-Instruct-v0.1",
+    # OLMoE
+    "allenai/OLMoE-1B-7B-0125",
+    # Phi
+    "microsoft/Phi-3.5-MoE-instruct",
+]
+
+# MoE configuration taken from the paper table:
+#   Active / Total experts per layer.
+MOE_CONFIG: dict[ModelName, Tuple[int, int]] = {
+    "openai/gpt-oss-20b": (4, 32),
+    "openai/gpt-oss-120b": (4, 128),
+    "Qwen/Qwen3-30B-A3B": (8, 128),
+    "mistralai/Mixtral-8x7B-Instruct-v0.1": (2, 8),
+    "allenai/OLMoE-1B-7B-0125": (8, 64),
+    "microsoft/Phi-3.5-MoE-instruct": (2, 16),
+}
+
+
 def make_expert_token_router_hook(
     layer_idx: int,
     expert_counts_by_token: torch.Tensor,
@@ -166,33 +192,7 @@ def _collect_expert_activation_counts_impl(
     return expert_counts_by_token, token_counts
 
 
-ModelName = Literal[
-    # OpenAI GPT-OSS series
-    "openai/gpt-oss-20b",
-    "openai/gpt-oss-120b",
-    # Qwen3
-    "Qwen/Qwen3-30B-A3B",
-    # Mixtral
-    "mistralai/Mixtral-8x7B-Instruct-v0.1",
-    # OLMoE
-    "allenai/OLMoE-1B-7B-0125",
-    # Phi
-    "microsoft/Phi-3.5-MoE-instruct",
-]
-
-# MoE configuration taken from the paper table:
-#   Active / Total experts per layer.
-MOE_CONFIG: dict[ModelName, Tuple[int, int]] = {
-    "openai/gpt-oss-20b": (4, 32),
-    "openai/gpt-oss-120b": (4, 128),
-    "Qwen/Qwen3-30B-A3B": (8, 128),
-    "mistralai/Mixtral-8x7B-Instruct-v0.1": (2, 8),
-    "allenai/OLMoE-1B-7B-0125": (8, 64),
-    "microsoft/Phi-3.5-MoE-instruct": (2, 16),
-}
-
-
-class GPT20MoELLM:
+class GPT20:
     """
     MoE LLM wrapper specialized for `openai/gpt-oss-20b`.
 
@@ -257,7 +257,7 @@ class GPT20MoELLM:
         )
 
 
-class Qwen30MoELLM:
+class Qwen30:
     """
     MoE LLM wrapper specialized for `Qwen/Qwen3-30B-A3B`.
 
@@ -321,6 +321,71 @@ class Qwen30MoELLM:
         )
 
 
+class Mixtral8x7B:
+    """
+    MoE LLM wrapper specialized for `mistralai/Mixtral-8x7B-Instruct-v0.1`.
+
+    Mixtral's gate emits router logits (shape: tokens x experts). We capture
+    those logits from `layer.block_sparse_moe.gate`, apply top-k routing, and
+    accumulate per-token expert activation counts.
+    """
+
+    def __init__(self, model_name: ModelName) -> None:
+        if model_name != "mistralai/Mixtral-8x7B-Instruct-v0.1":
+            raise ValueError(
+                "Mixtral8x7B only supports 'mistralai/Mixtral-8x7B-Instruct-v0.1'"
+            )
+
+        self.model_name: ModelName = model_name
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_name,
+            use_fast=True,
+            trust_remote_code=True,
+        )
+
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            dtype=torch.float16 if device == "cuda" else torch.float32,
+            device_map="auto",
+        )
+        self.model.eval()
+
+        # Use architecture-known values from MOE_CONFIG.
+        k_paper, num_experts_paper = MOE_CONFIG[model_name]
+        self.num_experts = int(num_experts_paper)
+        self.k = int(k_paper)
+        self.num_layers = len(self.model.model.layers)
+
+    def collect_expert_activation_counts(
+        self,
+        prompts: List[str],
+        token_id_to_index: dict[int, int],
+        *,
+        checkpoint_dir: str | None = None,
+        checkpoint_interval: int = CHECKPOINT_INTERVAL,
+        checkpoint_pass_name: str = "",
+        checkpoint_metadata: dict[str, str] | None = None,
+        resume_from: Tuple[torch.Tensor, torch.Tensor, int] | None = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Collect expert activation counts using Qwen router (gate) hooks."""
+        return _collect_expert_activation_counts_impl(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            layers=list(self.model.model.layers),
+            prompts=prompts,
+            token_id_to_index=token_id_to_index,
+            num_experts=self.num_experts,
+            get_router_module=lambda layer: layer.mlp.gate,
+            router_indices_output_index=2,
+            desc=f"Running MoE inference ({self.model_name})",
+            checkpoint_dir=checkpoint_dir,
+            checkpoint_interval=checkpoint_interval,
+            checkpoint_pass_name=checkpoint_pass_name,
+            checkpoint_metadata=checkpoint_metadata,
+            resume_from=resume_from,
+        )
+
+
 def get_moe_llm(model_name: ModelName):
     """
     Factory to obtain a MoE LLM wrapper for the given model.
@@ -328,13 +393,16 @@ def get_moe_llm(model_name: ModelName):
     Currently supports:
       - openai/gpt-oss-20b  -> GPT20MoELLM
       - Qwen/Qwen3-30B-A3B  -> Qwen30MoELLM
+      - mistralai/Mixtral-8x7B-Instruct-v0.1 -> Mixtral8x7B
 
     Other model names are not yet implemented.
     """
     if model_name == "openai/gpt-oss-20b":
-        return GPT20MoELLM(model_name=model_name)
+        return GPT20(model_name=model_name)
     if model_name == "Qwen/Qwen3-30B-A3B":
-        return Qwen30MoELLM(model_name=model_name)
+        return Qwen30(model_name=model_name)
+    if model_name == "mistralai/Mixtral-8x7B-Instruct-v0.1":
+        return Mixtral8x7B(model_name=model_name)
 
     raise NotImplementedError(
         f"MoE wrapper not implemented for model {model_name!r}. "
