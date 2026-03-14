@@ -166,7 +166,7 @@ if __name__ == "__main__":
         "--model",
         dest="model_name",
         type=str,
-        default="allenai/OLMoE-1B-7B-0125",
+        default="microsoft/Phi-3.5-MoE-instruct",
         help="Hugging Face model identifier for the MoE LLM.",
     )
     parser.add_argument(
