@@ -5,6 +5,7 @@ from typing import Literal
 import torch
 from tqdm.auto import tqdm
 
+from checkpoint import CHECKPOINT_INTERVAL, load_collection_checkpoint
 from faithfulness import FaithfulnessDataset
 from llm import ModelName, get_moe_llm
 
@@ -16,6 +17,12 @@ def _collect_expert_activation_counts(
     prompts: list[str],
     model_name: ModelName,
     token_id_to_index: dict[int, int],
+    *,
+    checkpoint_dir: str | None = None,
+    checkpoint_interval: int = CHECKPOINT_INTERVAL,
+    checkpoint_pass_name: str = "",
+    checkpoint_metadata: dict[str, str] | None = None,
+    resume_from: tuple[torch.Tensor, torch.Tensor, int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Run the model on the given prompts and collect, for each layer/expert/token,
@@ -26,9 +33,16 @@ def _collect_expert_activation_counts(
         token_counts: tensor of shape [num_tokens], giving how many times each
                       token appears across all prompts.
     """
-
     moe_model = get_moe_llm(model_name)
-    return moe_model.collect_expert_activation_counts(prompts, token_id_to_index)
+    return moe_model.collect_expert_activation_counts(
+        prompts,
+        token_id_to_index,
+        checkpoint_dir=checkpoint_dir,
+        checkpoint_interval=checkpoint_interval,
+        checkpoint_pass_name=checkpoint_pass_name,
+        checkpoint_metadata=checkpoint_metadata,
+        resume_from=resume_from,
+    )
 
 
 def get_steermoe_activations(
@@ -36,7 +50,10 @@ def get_steermoe_activations(
     task: TaskName,
     model_name: ModelName,
     token_id_to_index: dict[int, int],
-) -> torch.Tensor:
+    *,
+    checkpoint_dir: str | None = None,
+    checkpoint_interval: int = CHECKPOINT_INTERVAL,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """
     Compute the risk-difference matrix for a given dataset and MoE model.
 
@@ -54,8 +71,13 @@ def get_steermoe_activations(
     Internally, we keep counts per (expert, token_index) and only aggregate
     across tokens at the final step when computing risk differences.
 
+    If checkpoint_dir is set, collection state is saved every checkpoint_interval
+    prompts and can be resumed on the next run.
+
     Returns:
         risk_diff: tensor of shape [num_layers, num_experts]
+        raw_state: dict with expert_counts_x1, expert_counts_x2, token_counts_x1,
+                   token_counts_x2 (unaggregated, for saving raw deltas).
     """
     if task != "faithfulness":
         raise ValueError("Only the 'faithfulness' task is currently supported.")
@@ -71,15 +93,46 @@ def get_steermoe_activations(
         prompts_x1.append(f"Document: {document}, Question: {question}, Answer: ")
         prompts_x2.append(f"Question: {question}, Answer: ")
 
+    meta = {"dataset_name": dataset_name, "model_name": model_name}
+
+    resume_x1 = None
+    if checkpoint_dir:
+        loaded = load_collection_checkpoint(
+            checkpoint_dir, "x1", dataset_name=dataset_name, model_name=model_name
+        )
+        if loaded is not None:
+            expert_counts_x1, token_counts_x1, step, _ = loaded
+            resume_x1 = (expert_counts_x1, token_counts_x1, step)
+
     expert_counts_x1, token_counts_x1 = _collect_expert_activation_counts(
         prompts_x1,
         model_name=model_name,
         token_id_to_index=token_id_to_index,
+        checkpoint_dir=checkpoint_dir,
+        checkpoint_interval=checkpoint_interval,
+        checkpoint_pass_name="x1",
+        checkpoint_metadata=meta,
+        resume_from=resume_x1,
     )
+
+    resume_x2 = None
+    if checkpoint_dir:
+        loaded = load_collection_checkpoint(
+            checkpoint_dir, "x2", dataset_name=dataset_name, model_name=model_name
+        )
+        if loaded is not None:
+            expert_counts_x2, token_counts_x2, step, _ = loaded
+            resume_x2 = (expert_counts_x2, token_counts_x2, step)
+
     expert_counts_x2, token_counts_x2 = _collect_expert_activation_counts(
         prompts_x2,
         model_name=model_name,
         token_id_to_index=token_id_to_index,
+        checkpoint_dir=checkpoint_dir,
+        checkpoint_interval=checkpoint_interval,
+        checkpoint_pass_name="x2",
+        checkpoint_metadata=meta,
+        resume_from=resume_x2,
     )
 
     total_tokens_x1 = int(token_counts_x1.sum().item())
@@ -96,4 +149,10 @@ def get_steermoe_activations(
     p2 = expert_counts_x2_agg.to(torch.float32) / float(total_tokens_x2)
 
     risk_diff = p1 - p2  # [num_layers, num_experts]
-    return risk_diff
+    raw_state = {
+        "expert_counts_x1": expert_counts_x1,
+        "expert_counts_x2": expert_counts_x2,
+        "token_counts_x1": token_counts_x1,
+        "token_counts_x2": token_counts_x2,
+    }
+    return risk_diff, raw_state

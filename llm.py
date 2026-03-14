@@ -4,6 +4,10 @@ import torch
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
 
+from checkpoint import (
+    CHECKPOINT_INTERVAL,
+    save_collection_checkpoint,
+)
 from device import device
 
 
@@ -70,21 +74,37 @@ def _collect_expert_activation_counts_impl(
     get_router_module: Callable[[torch.nn.Module], torch.nn.Module],
     router_indices_output_index: int = 2,
     desc: str = "Running MoE inference",
+    *,
+    checkpoint_dir: str | None = None,
+    checkpoint_interval: int = CHECKPOINT_INTERVAL,
+    checkpoint_pass_name: str = "",
+    checkpoint_metadata: dict[str, str] | None = None,
+    resume_from: Tuple[torch.Tensor, torch.Tensor, int] | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Generic implementation: run the model on prompts and collect per (layer, expert,
     token_index) activation counts. get_router_module(layer) should return the
     router submodule to hook (e.g. layer.mlp.router or layer.mlp.gate).
+
+    Optional: checkpoint_dir + checkpoint_interval + checkpoint_pass_name to save
+    every N prompts; resume_from=(expert_counts, token_counts, start_index) to resume.
     """
     num_layers = len(layers)
     num_token_indices = len(token_id_to_index)
-    expert_counts_by_token = torch.zeros(
-        num_layers, num_experts, num_token_indices, dtype=torch.long
-    )
-    token_counts = torch.zeros(num_token_indices, dtype=torch.long)
-
-    # Use first parameter's device so embedding and inputs match (required for forward).
     model_device = next(model.parameters()).device
+
+    if resume_from is not None:
+        expert_counts_by_token, token_counts, start_index = resume_from
+        expert_counts_by_token = expert_counts_by_token.to(model_device)
+        token_counts = token_counts.to(model_device)
+        prompts = prompts[start_index:]
+    else:
+        start_index = 0
+        expert_counts_by_token = torch.zeros(
+            num_layers, num_experts, num_token_indices, dtype=torch.long
+        )
+        token_counts = torch.zeros(num_token_indices, dtype=torch.long)
+
     vocab_size = tokenizer.vocab_size
     id_to_index = torch.full((vocab_size,), -1, dtype=torch.long, device=model_device)
     for tid, idx in token_id_to_index.items():
@@ -107,8 +127,10 @@ def _collect_expert_activation_counts_impl(
         )
         hooks.append(h)
 
+    meta = checkpoint_metadata or {}
     with torch.inference_mode():
-        for prompt in tqdm(prompts, desc=desc):
+        for local_i, prompt in enumerate(tqdm(prompts, desc=desc)):
+            global_i = start_index + local_i
             encoded = tokenizer(
                 prompt,
                 return_tensors="pt",
@@ -121,6 +143,23 @@ def _collect_expert_activation_counts_impl(
                 if 0 <= idx < num_token_indices:
                     token_counts[idx] += 1
             _ = model(**encoded)
+
+            if (
+                checkpoint_dir
+                and checkpoint_interval > 0
+                and (global_i + 1) % checkpoint_interval == 0
+            ):
+                save_collection_checkpoint(
+                    checkpoint_dir,
+                    checkpoint_pass_name,
+                    global_i + 1,
+                    expert_counts_by_token,
+                    token_counts,
+                    num_experts=num_experts,
+                    num_token_indices=num_token_indices,
+                    dataset_name=meta.get("dataset_name", ""),
+                    model_name=meta.get("model_name", ""),
+                )
 
     for h in hooks:
         h.remove()
@@ -192,6 +231,12 @@ class GPT20MoELLM:
         self,
         prompts: List[str],
         token_id_to_index: dict[int, int],
+        *,
+        checkpoint_dir: str | None = None,
+        checkpoint_interval: int = CHECKPOINT_INTERVAL,
+        checkpoint_pass_name: str = "",
+        checkpoint_metadata: dict[str, str] | None = None,
+        resume_from: Tuple[torch.Tensor, torch.Tensor, int] | None = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Collect expert activation counts using GPT-OSS router hooks."""
         return _collect_expert_activation_counts_impl(
@@ -204,6 +249,11 @@ class GPT20MoELLM:
             get_router_module=lambda layer: layer.mlp.router,
             router_indices_output_index=2,
             desc=f"Running MoE inference ({self.model_name})",
+            checkpoint_dir=checkpoint_dir,
+            checkpoint_interval=checkpoint_interval,
+            checkpoint_pass_name=checkpoint_pass_name,
+            checkpoint_metadata=checkpoint_metadata,
+            resume_from=resume_from,
         )
 
 
@@ -245,6 +295,12 @@ class Qwen30MoELLM:
         self,
         prompts: List[str],
         token_id_to_index: dict[int, int],
+        *,
+        checkpoint_dir: str | None = None,
+        checkpoint_interval: int = CHECKPOINT_INTERVAL,
+        checkpoint_pass_name: str = "",
+        checkpoint_metadata: dict[str, str] | None = None,
+        resume_from: Tuple[torch.Tensor, torch.Tensor, int] | None = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Collect expert activation counts using Qwen router (gate) hooks."""
         return _collect_expert_activation_counts_impl(
@@ -257,6 +313,11 @@ class Qwen30MoELLM:
             get_router_module=lambda layer: layer.mlp.gate,
             router_indices_output_index=2,
             desc=f"Running MoE inference ({self.model_name})",
+            checkpoint_dir=checkpoint_dir,
+            checkpoint_interval=checkpoint_interval,
+            checkpoint_pass_name=checkpoint_pass_name,
+            checkpoint_metadata=checkpoint_metadata,
+            resume_from=resume_from,
         )
 
 
