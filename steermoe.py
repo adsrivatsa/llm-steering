@@ -16,7 +16,7 @@ TaskName = Literal["faithfulness"]
 
 def _collect_expert_activation_counts(
     prompts: list[str],
-    model_name: ModelName,
+    moe_model,
     token_id_to_index: dict[int, int],
     *,
     checkpoint_dir: str | None = None,
@@ -34,7 +34,6 @@ def _collect_expert_activation_counts(
         token_counts: tensor of shape [num_tokens], giving how many times each
                       token appears across all prompts.
     """
-    moe_model = get_moe_llm(model_name)
     return moe_model.collect_expert_activation_counts(
         prompts,
         token_id_to_index,
@@ -83,6 +82,10 @@ def get_steermoe_activations(
     if task != "faithfulness":
         raise ValueError("Only the 'faithfulness' task is currently supported.")
 
+    # Load once and reuse across x1/x2 passes to avoid a second heavyweight
+    # model initialization (which can trigger additional OOMs).
+    moe_model = get_moe_llm(model_name)
+
     dataset = FaithfulnessDataset(dataset_name=dataset_name, split="train")
 
     prompts_x1: list[str] = []
@@ -114,7 +117,7 @@ def get_steermoe_activations(
 
     expert_counts_x1, token_counts_x1 = _collect_expert_activation_counts(
         prompts_x1,
-        model_name=model_name,
+        moe_model=moe_model,
         token_id_to_index=token_id_to_index,
         checkpoint_dir=checkpoint_dir,
         checkpoint_interval=checkpoint_interval,
@@ -136,7 +139,7 @@ def get_steermoe_activations(
 
     expert_counts_x2, token_counts_x2 = _collect_expert_activation_counts(
         prompts_x2,
-        model_name=model_name,
+        moe_model=moe_model,
         token_id_to_index=token_id_to_index,
         checkpoint_dir=checkpoint_dir,
         checkpoint_interval=checkpoint_interval,
