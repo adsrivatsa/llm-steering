@@ -112,6 +112,8 @@ def main(
         dataset_name=dataset_name,
         model_name=model_name,
         token_id_to_index=token_id_to_index,
+        checkpoint_dir=checkpoint.DIR,
+        checkpoint_interval=checkpoint.INTERVAL,
     )
 
 
