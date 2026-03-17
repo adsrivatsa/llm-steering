@@ -110,7 +110,6 @@ def main(
     # Compute raw expert activation counts for both x1 and x2 passes.
     faithfulness_activations(
         dataset_name=dataset_name,
-        task="faithfulness",
         model_name=model_name,
         token_id_to_index=token_id_to_index,
     )
