@@ -230,7 +230,7 @@ class GPT20:
 
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            dtype=torch.float16 if device == "cuda" else torch.float32,
+            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
             device_map="auto",
         )
         self.model.eval()
@@ -294,7 +294,7 @@ class Qwen30:
 
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            dtype=torch.float16 if device == "cuda" else torch.float32,
+            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
             device_map="auto",
         )
         self.model.eval()
@@ -360,7 +360,7 @@ class Mixtral8x7B:
 
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            dtype=torch.float16 if device == "cuda" else torch.float32,
+            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
             device_map="auto",
         )
         self.model.eval()
@@ -421,7 +421,7 @@ class OLMoE7B:
 
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            dtype=torch.float16 if device == "cuda" else torch.float32,
+            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
             device_map="auto",
         )
         self.model.eval()
@@ -482,7 +482,7 @@ class Phi42B:
 
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            dtype=torch.float16 if device == "cuda" else torch.float32,
+            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
             device_map="auto",
         )
         self.model.eval()
