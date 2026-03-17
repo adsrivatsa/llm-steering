@@ -28,9 +28,12 @@ def _collect_unique_token_ids(
     for document, question in tqdm(
         dataset, desc=f"Collecting unique tokens ({dataset_name}, {split})"
     ):
-        prompt = f"Document: {document}, Question: {question}, Answer: "
-        encoded = tokenizer(prompt, add_special_tokens=False)["input_ids"]
-        unique_token_ids.update(encoded)
+        for prompt in (
+            f"Document: {document}, Question: {question}, Answer: ",
+            f"Question: {question}, Answer: ",
+        ):
+            encoded = tokenizer(prompt, add_special_tokens=True)["input_ids"]
+            unique_token_ids.update(encoded)
 
     return unique_token_ids
 
@@ -88,9 +91,12 @@ def build_token_frequency_table(
     for document, question in tqdm(
         dataset, desc=f"Building frequency table ({dataset_name}, {split})"
     ):
-        prompt = f"Document: {document}, Question: {question}, Answer: "
-        input_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
-        counter.update(input_ids)
+        for prompt in (
+            f"Document: {document}, Question: {question}, Answer: ",
+            f"Question: {question}, Answer: ",
+        ):
+            input_ids = tokenizer(prompt, add_special_tokens=True)["input_ids"]
+            counter.update(input_ids)
 
     # Convert Counter to a plain dict[int, int]
     return dict(counter)
