@@ -7,7 +7,7 @@ from torch.utils.data import Dataset
 DatasetName = Literal["squad"]
 
 
-class SquadFaithfulnessDataset(Dataset):
+class SQuAD(Dataset):
     """
     PyTorch Dataset wrapper around the SQuAD dataset.
 
@@ -44,7 +44,7 @@ class FaithfulnessDataset(Dataset):
         self.dataset_name: DatasetName = dataset_name
 
         if dataset_name == "squad":
-            self._dataset: Dataset = SquadFaithfulnessDataset(split=split)
+            self._dataset: Dataset = SQuAD(split=split)
         else:
             # This is protected by the Literal type, but kept for safety.
             raise ValueError(f"Unsupported dataset_name: {dataset_name!r}")
@@ -54,4 +54,3 @@ class FaithfulnessDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Tuple[str, str]:
         return self._dataset[idx]
-

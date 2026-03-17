@@ -2,12 +2,11 @@ from collections import Counter
 import os
 import argparse
 
-import torch
 from tqdm.auto import tqdm
-from checkpoint import save_final_activations, save_final_raw
+import checkpoint
 from faithfulness import FaithfulnessDataset, DatasetName
 from llm import ModelName
-from steermoe import get_steermoe_activations
+from steer import faithfulness_activations
 from transformers import AutoTokenizer
 
 
@@ -100,8 +99,6 @@ def build_token_frequency_table(
 def main(
     dataset_name: DatasetName,
     model_name: ModelName,
-    checkpoint_dir: str | None = None,
-    checkpoint_interval: int = 10,
 ) -> None:
     # Build the token index lookup once and pass the mapping from
     # token_id -> local index into the SteerMoE computation so we can
@@ -110,50 +107,18 @@ def main(
         dataset_name=dataset_name, model_name=model_name, split="train"
     )
 
-    # Compute risk-difference matrix with optional checkpointing every 10 prompts.
-    risk_diff, raw_state = get_steermoe_activations(
+    # Compute raw expert activation counts for both x1 and x2 passes.
+    faithfulness_activations(
         dataset_name=dataset_name,
         task="faithfulness",
         model_name=model_name,
         token_id_to_index=token_id_to_index,
-        checkpoint_dir=checkpoint_dir,
-        checkpoint_interval=checkpoint_interval,
-    )
-
-    # Convert risk difference (delta) matrix into epsilon matrix using a scalar eps.
-    eps = 0.1  # TODO: tune this hyperparameter as needed
-    epsilon = torch.zeros_like(risk_diff)
-    epsilon[risk_diff > 0] = eps
-    epsilon[risk_diff < 0] = -eps
-
-    # Save aggregated epsilon and delta under activations/epsilon and activations/delta.
-    eps_dir = os.path.join("activations", "epsilon")
-    delta_dir = os.path.join("activations", "delta")
-    eps_path, delta_path = save_final_activations(
-        eps_dir,
-        delta_dir,
-        epsilon,
-        risk_diff,
-        dataset_name=dataset_name,
-        model_name=model_name,
-    )
-
-    # Save final raw deltas (unaggregated counts) under activations/raw.
-    raw_dir = os.path.join("activations", "raw")
-    save_final_raw(
-        raw_dir,
-        raw_state["expert_counts_x1"],
-        raw_state["expert_counts_x2"],
-        raw_state["token_counts_x1"],
-        raw_state["token_counts_x2"],
-        dataset_name=dataset_name,
-        model_name=model_name,
     )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Compute and save SteerMoE activations (epsilon and delta matrices)."
+        description="Compute and save raw SteerMoE activations."
     )
     parser.add_argument(
         "--dataset",
@@ -169,29 +134,12 @@ if __name__ == "__main__":
         default="microsoft/Phi-3.5-MoE-instruct",
         help="Hugging Face model identifier for the MoE LLM.",
     )
-    parser.add_argument(
-        "--checkpoint-dir",
-        type=str,
-        default="checkpoints",
-        help="Directory for collection checkpoints (every N prompts). Enables save/resume. Use '' to disable.",
-    )
-    parser.add_argument(
-        "--checkpoint-interval",
-        type=int,
-        default=50,
-        help="Save a checkpoint every this many prompts (default: 10).",
-    )
 
     args = parser.parse_args()
     dataset_name: DatasetName = args.dataset  # type: ignore[assignment]
     model_name: ModelName = args.model_name  # type: ignore[assignment]
 
-    # Use default "checkpoints" so resume works; pass --checkpoint-dir '' to disable.
-    checkpoint_dir = args.checkpoint_dir or None
-
     main(
         dataset_name=dataset_name,
         model_name=model_name,
-        checkpoint_dir=checkpoint_dir,
-        checkpoint_interval=args.checkpoint_interval,
     )

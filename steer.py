@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import os
 from typing import Literal
 
 import torch
 from tqdm.auto import tqdm
 
-from checkpoint import CHECKPOINT_INTERVAL, load_collection_checkpoint
+import checkpoint
 from faithfulness import FaithfulnessDataset
 from llm import ModelName, get_moe_llm
 
@@ -14,13 +13,13 @@ from llm import ModelName, get_moe_llm
 TaskName = Literal["faithfulness"]
 
 
-def _collect_expert_activation_counts(
+def save_expert_activations(
     prompts: list[str],
     moe_model,
     token_id_to_index: dict[int, int],
     *,
     checkpoint_dir: str | None = None,
-    checkpoint_interval: int = CHECKPOINT_INTERVAL,
+    checkpoint_interval: int = checkpoint.INTERVAL,
     checkpoint_pass_name: str = "",
     checkpoint_metadata: dict[str, str] | None = None,
     resume_from: tuple[torch.Tensor, torch.Tensor, int] | None = None,
@@ -34,7 +33,7 @@ def _collect_expert_activation_counts(
         token_counts: tensor of shape [num_tokens], giving how many times each
                       token appears across all prompts.
     """
-    return moe_model.collect_expert_activation_counts(
+    return moe_model.save_expert_activations(
         prompts,
         token_id_to_index,
         checkpoint_dir=checkpoint_dir,
@@ -45,14 +44,13 @@ def _collect_expert_activation_counts(
     )
 
 
-def get_steermoe_activations(
+def faithfulness_activations(
     dataset_name: str,
-    task: TaskName,
     model_name: ModelName,
     token_id_to_index: dict[int, int],
     *,
     checkpoint_dir: str | None = None,
-    checkpoint_interval: int = CHECKPOINT_INTERVAL,
+    checkpoint_interval: int = checkpoint.INTERVAL,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """
     Compute the risk-difference matrix for a given dataset and MoE model.
@@ -71,19 +69,11 @@ def get_steermoe_activations(
     Internally, we keep counts per (expert, token_index) and only aggregate
     across tokens at the final step when computing risk differences.
 
-    If checkpoint_dir is set, collection state is saved every checkpoint_interval
-    prompts and can be resumed on the next run.
-
     Returns:
         risk_diff: tensor of shape [num_layers, num_experts]
         raw_state: dict with expert_counts_x1, expert_counts_x2, token_counts_x1,
                    token_counts_x2 (unaggregated, for saving raw deltas).
     """
-    if task != "faithfulness":
-        raise ValueError("Only the 'faithfulness' task is currently supported.")
-
-    # Load once and reuse across x1/x2 passes to avoid a second heavyweight
-    # model initialization (which can trigger additional OOMs).
     moe_model = get_moe_llm(model_name)
 
     dataset = FaithfulnessDataset(dataset_name=dataset_name, split="train")
@@ -97,75 +87,63 @@ def get_steermoe_activations(
         prompts_x1.append(f"Document: {document}, Question: {question}, Answer: ")
         prompts_x2.append(f"Question: {question}, Answer: ")
 
-    meta = {"dataset_name": dataset_name, "model_name": model_name}
-
-    # Resolve to absolute path so resume works regardless of cwd
-    if checkpoint_dir:
-        checkpoint_dir = os.path.abspath(checkpoint_dir)
-        print(f"Checkpoint directory: {checkpoint_dir}")
-
+    metadata = {"dataset_name": dataset_name, "model_name": model_name}
     resume_x1 = None
     if checkpoint_dir:
-        loaded = load_collection_checkpoint(
-            checkpoint_dir, "x1", dataset_name=dataset_name, model_name=model_name
+        loaded_x1 = checkpoint.load(
+            checkpoint_dir,
+            pass_name="x1",
+            dataset_name=dataset_name,
+            model_name=model_name,
         )
-        if loaded is not None:
-            expert_counts_x1, token_counts_x1, step, _ = loaded
-            resume_x1 = (expert_counts_x1, token_counts_x1, step)
-            remaining = len(prompts_x1) - step
-            print(f"Resuming x1 from prompt {step} ({remaining} remaining)")
+        if loaded_x1 is not None:
+            step = int(loaded_x1.get("step") or 0)
+            if step > 0:
+                resume_x1 = (
+                    loaded_x1["expert_counts_by_token"],
+                    loaded_x1["token_counts"],
+                    step,
+                )
+                remaining = max(0, len(prompts_x1) - step)
+                print(f"Resuming x1 from prompt {step} ({remaining} remaining)")
 
-    expert_counts_x1, token_counts_x1 = _collect_expert_activation_counts(
+    expert_counts_x1, token_counts_x1 = moe_model.save_expert_activations(
         prompts_x1,
-        moe_model=moe_model,
         token_id_to_index=token_id_to_index,
         checkpoint_dir=checkpoint_dir,
         checkpoint_interval=checkpoint_interval,
         checkpoint_pass_name="x1",
-        checkpoint_metadata=meta,
+        checkpoint_metadata=metadata,
         resume_from=resume_x1,
     )
 
     resume_x2 = None
     if checkpoint_dir:
-        loaded = load_collection_checkpoint(
-            checkpoint_dir, "x2", dataset_name=dataset_name, model_name=model_name
+        loaded_x2 = checkpoint.load(
+            checkpoint_dir,
+            pass_name="x2",
+            dataset_name=dataset_name,
+            model_name=model_name,
         )
-        if loaded is not None:
-            expert_counts_x2, token_counts_x2, step, _ = loaded
-            resume_x2 = (expert_counts_x2, token_counts_x2, step)
-            remaining = len(prompts_x2) - step
-            print(f"Resuming x2 from prompt {step} ({remaining} remaining)")
+        if loaded_x2 is not None:
+            step = int(loaded_x2.get("step") or 0)
+            if step > 0:
+                resume_x2 = (
+                    loaded_x2["expert_counts_by_token"],
+                    loaded_x2["token_counts"],
+                    step,
+                )
+                remaining = max(0, len(prompts_x2) - step)
+                print(f"Resuming x2 from prompt {step} ({remaining} remaining)")
 
-    expert_counts_x2, token_counts_x2 = _collect_expert_activation_counts(
+    expert_counts_x2, token_counts_x2 = moe_model.save_expert_activations(
         prompts_x2,
-        moe_model=moe_model,
         token_id_to_index=token_id_to_index,
         checkpoint_dir=checkpoint_dir,
         checkpoint_interval=checkpoint_interval,
         checkpoint_pass_name="x2",
-        checkpoint_metadata=meta,
+        checkpoint_metadata=metadata,
         resume_from=resume_x2,
     )
 
-    total_tokens_x1 = int(token_counts_x1.sum().item())
-    total_tokens_x2 = int(token_counts_x2.sum().item())
-
-    if total_tokens_x1 == 0 or total_tokens_x2 == 0:
-        raise RuntimeError("No tokens processed when computing expert activations.")
-
-    # Aggregate over the token dimension at the end.
-    expert_counts_x1_agg = expert_counts_x1.sum(dim=2)  # [num_layers, num_experts]
-    expert_counts_x2_agg = expert_counts_x2.sum(dim=2)  # [num_layers, num_experts]
-
-    p1 = expert_counts_x1_agg.to(torch.float32) / float(total_tokens_x1)
-    p2 = expert_counts_x2_agg.to(torch.float32) / float(total_tokens_x2)
-
-    risk_diff = p1 - p2  # [num_layers, num_experts]
-    raw_state = {
-        "expert_counts_x1": expert_counts_x1,
-        "expert_counts_x2": expert_counts_x2,
-        "token_counts_x1": token_counts_x1,
-        "token_counts_x2": token_counts_x2,
-    }
-    return risk_diff, raw_state
+    return expert_counts_x1, token_counts_x1, expert_counts_x2, token_counts_x2

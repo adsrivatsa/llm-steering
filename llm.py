@@ -4,10 +4,7 @@ import torch
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
 
-from checkpoint import (
-    CHECKPOINT_INTERVAL,
-    save_collection_checkpoint,
-)
+import checkpoint
 from device import device
 
 
@@ -37,7 +34,7 @@ MOE_CONFIG: dict[ModelName, Tuple[int, int]] = {
 }
 
 
-def make_expert_token_router_hook(
+def expert_activation_hook(
     layer_idx: int,
     expert_counts_by_token: torch.Tensor,
     current_token_indices_ref: List[torch.Tensor | None],
@@ -90,7 +87,7 @@ def make_expert_token_router_hook(
     return hook
 
 
-def _collect_expert_activation_counts_impl(
+def save_expert_activations(
     model: torch.nn.Module,
     tokenizer: PreTrainedTokenizerBase,
     layers: List[torch.nn.Module],
@@ -102,7 +99,7 @@ def _collect_expert_activation_counts_impl(
     desc: str = "Running MoE inference",
     *,
     checkpoint_dir: str | None = None,
-    checkpoint_interval: int = CHECKPOINT_INTERVAL,
+    checkpoint_interval: int = checkpoint.INTERVAL,
     checkpoint_pass_name: str = "",
     checkpoint_metadata: dict[str, str] | None = None,
     resume_from: Tuple[torch.Tensor, torch.Tensor, int] | None = None,
@@ -112,8 +109,10 @@ def _collect_expert_activation_counts_impl(
     token_index) activation counts. get_router_module(layer) should return the
     router submodule to hook (e.g. layer.mlp.router or layer.mlp.gate).
 
-    Optional: checkpoint_dir + checkpoint_interval + checkpoint_pass_name to save
-    every N prompts; resume_from=(expert_counts, token_counts, start_index) to resume.
+    If checkpoint_dir is provided, raw per-pass checkpoints are saved every
+    checkpoint_interval prompts.
+    resume_from=(expert_counts, token_counts, start_index) can be provided to
+    continue from an externally managed checkpoint state.
     """
     num_layers = len(layers)
     num_token_indices = len(token_id_to_index)
@@ -142,7 +141,7 @@ def _collect_expert_activation_counts_impl(
     for i, layer in enumerate(layers):
         router_module = get_router_module(layer)
         h = router_module.register_forward_hook(
-            make_expert_token_router_hook(
+            expert_activation_hook(
                 layer_idx=i,
                 expert_counts_by_token=expert_counts_by_token,
                 current_token_indices_ref=current_token_indices_ref,
@@ -154,6 +153,16 @@ def _collect_expert_activation_counts_impl(
         hooks.append(h)
 
     meta = checkpoint_metadata or {}
+    dataset_name = meta.get("dataset_name", "")
+    model_name = meta.get("model_name", "")
+    should_checkpoint = bool(
+        checkpoint_dir
+        and checkpoint_interval > 0
+        and checkpoint_pass_name
+        and dataset_name
+        and model_name
+    )
+
     with torch.inference_mode():
         for local_i, prompt in enumerate(tqdm(prompts, desc=desc)):
             global_i = start_index + local_i
@@ -170,22 +179,28 @@ def _collect_expert_activation_counts_impl(
                     token_counts[idx] += 1
             _ = model(**encoded)
 
-            if (
-                checkpoint_dir
-                and checkpoint_interval > 0
-                and (global_i + 1) % checkpoint_interval == 0
-            ):
-                save_collection_checkpoint(
-                    checkpoint_dir,
+            if should_checkpoint and (global_i + 1) % checkpoint_interval == 0:
+                checkpoint.save(
+                    checkpoint_dir,  # type: ignore[arg-type]
                     checkpoint_pass_name,
-                    global_i + 1,
                     expert_counts_by_token,
                     token_counts,
-                    num_experts=num_experts,
-                    num_token_indices=num_token_indices,
-                    dataset_name=meta.get("dataset_name", ""),
-                    model_name=meta.get("model_name", ""),
+                    dataset_name=dataset_name,
+                    model_name=model_name,
+                    step=global_i + 1,
                 )
+
+    if should_checkpoint and len(prompts) > 0:
+        final_step = start_index + len(prompts)
+        checkpoint.save(
+            checkpoint_dir,  # type: ignore[arg-type]
+            checkpoint_pass_name,
+            expert_counts_by_token,
+            token_counts,
+            dataset_name=dataset_name,
+            model_name=model_name,
+            step=final_step,
+        )
 
     for h in hooks:
         h.remove()
@@ -227,19 +242,19 @@ class GPT20:
         self.k = int(k_paper)
         self.num_layers = len(self.model.model.layers)
 
-    def collect_expert_activation_counts(
+    def save_expert_activations(
         self,
         prompts: List[str],
         token_id_to_index: dict[int, int],
         *,
         checkpoint_dir: str | None = None,
-        checkpoint_interval: int = CHECKPOINT_INTERVAL,
+        checkpoint_interval: int = checkpoint.INTERVAL,
         checkpoint_pass_name: str = "",
         checkpoint_metadata: dict[str, str] | None = None,
         resume_from: Tuple[torch.Tensor, torch.Tensor, int] | None = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Collect expert activation counts using GPT-OSS router hooks."""
-        return _collect_expert_activation_counts_impl(
+        return save_expert_activations(
             model=self.model,
             tokenizer=self.tokenizer,
             layers=list(self.model.model.layers),
@@ -291,19 +306,19 @@ class Qwen30:
         self.k = int(k_paper)
         self.num_layers = len(self.model.model.layers)
 
-    def collect_expert_activation_counts(
+    def save_expert_activations(
         self,
         prompts: List[str],
         token_id_to_index: dict[int, int],
         *,
         checkpoint_dir: str | None = None,
-        checkpoint_interval: int = CHECKPOINT_INTERVAL,
+        checkpoint_interval: int = checkpoint.INTERVAL,
         checkpoint_pass_name: str = "",
         checkpoint_metadata: dict[str, str] | None = None,
         resume_from: Tuple[torch.Tensor, torch.Tensor, int] | None = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Collect expert activation counts using Qwen router (gate) hooks."""
-        return _collect_expert_activation_counts_impl(
+        return save_expert_activations(
             model=self.model,
             tokenizer=self.tokenizer,
             layers=list(self.model.model.layers),
@@ -356,19 +371,19 @@ class Mixtral8x7B:
         self.k = int(k_paper)
         self.num_layers = len(self.model.model.layers)
 
-    def collect_expert_activation_counts(
+    def save_expert_activations(
         self,
         prompts: List[str],
         token_id_to_index: dict[int, int],
         *,
         checkpoint_dir: str | None = None,
-        checkpoint_interval: int = CHECKPOINT_INTERVAL,
+        checkpoint_interval: int = checkpoint.INTERVAL,
         checkpoint_pass_name: str = "",
         checkpoint_metadata: dict[str, str] | None = None,
         resume_from: Tuple[torch.Tensor, torch.Tensor, int] | None = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Collect expert activation counts using Qwen router (gate) hooks."""
-        return _collect_expert_activation_counts_impl(
+        return save_expert_activations(
             model=self.model,
             tokenizer=self.tokenizer,
             layers=list(self.model.model.layers),
@@ -417,19 +432,19 @@ class OLMoE7B:
         self.k = int(k_paper)
         self.num_layers = len(self.model.model.layers)
 
-    def collect_expert_activation_counts(
+    def save_expert_activations(
         self,
         prompts: List[str],
         token_id_to_index: dict[int, int],
         *,
         checkpoint_dir: str | None = None,
-        checkpoint_interval: int = CHECKPOINT_INTERVAL,
+        checkpoint_interval: int = checkpoint.INTERVAL,
         checkpoint_pass_name: str = "",
         checkpoint_metadata: dict[str, str] | None = None,
         resume_from: Tuple[torch.Tensor, torch.Tensor, int] | None = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Collect expert activation counts using OLMoE router (gate) hooks."""
-        return _collect_expert_activation_counts_impl(
+        return save_expert_activations(
             model=self.model,
             tokenizer=self.tokenizer,
             layers=list(self.model.model.layers),
@@ -478,19 +493,19 @@ class Phi42B:
         self.k = int(k_paper)
         self.num_layers = len(self.model.model.layers)
 
-    def collect_expert_activation_counts(
+    def save_expert_activations(
         self,
         prompts: List[str],
         token_id_to_index: dict[int, int],
         *,
         checkpoint_dir: str | None = None,
-        checkpoint_interval: int = CHECKPOINT_INTERVAL,
+        checkpoint_interval: int = checkpoint.INTERVAL,
         checkpoint_pass_name: str = "",
         checkpoint_metadata: dict[str, str] | None = None,
         resume_from: Tuple[torch.Tensor, torch.Tensor, int] | None = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Collect expert activation counts using Phi-3.5 router (gate) hooks."""
-        return _collect_expert_activation_counts_impl(
+        return save_expert_activations(
             model=self.model,
             tokenizer=self.tokenizer,
             layers=list(self.model.model.layers),
