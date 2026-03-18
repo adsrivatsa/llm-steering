@@ -4,7 +4,7 @@ import argparse
 
 from tqdm.auto import tqdm
 import checkpoint
-from faithfulness import FaithfulnessDataset, DatasetName
+from dataset import FaithfulnessDataset, DatasetName
 from llm import ModelName
 from steer import faithfulness_activations
 from transformers import AutoTokenizer

@@ -1,16 +1,11 @@
 from __future__ import annotations
 
-from typing import Literal
-
 import torch
 from tqdm.auto import tqdm
 
 import checkpoint
-from faithfulness import FaithfulnessDataset
+from dataset import FaithfulnessDataset
 from llm import ModelName, get_moe_llm
-
-
-TaskName = Literal["faithfulness"]
 
 
 def save_expert_activations(
