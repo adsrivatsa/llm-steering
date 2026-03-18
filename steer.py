@@ -4,7 +4,7 @@ import torch
 from tqdm.auto import tqdm
 
 import checkpoint
-from dataset import FaithfulnessDataset
+from dataset import SQuAD
 from llm import ModelName, get_moe_llm
 
 
@@ -40,7 +40,6 @@ def save_expert_activations(
 
 
 def faithfulness_activations(
-    dataset_name: str,
     model_name: ModelName,
     token_id_to_index: dict[int, int],
     *,
@@ -71,17 +70,18 @@ def faithfulness_activations(
     """
     moe_model = get_moe_llm(model_name)
 
-    dataset = FaithfulnessDataset(dataset_name=dataset_name, split="train")
+    dataset = SQuAD()
 
     prompts_x1: list[str] = []
     prompts_x2: list[str] = []
 
-    for document, question in tqdm(
-        dataset, desc=f"Building prompts for steermoe ({dataset_name})"
-    ):
-        prompts_x1.append(f"Document: {document}, Question: {question}, Answer: ")
-        prompts_x2.append(f"Question: {question}, Answer: ")
+    for example in tqdm(dataset, desc="Building prompts"):
+        prompts_x1.append(
+            f"Document: {example['context']}, Question: {example['question']}, Answer: "
+        )
+        prompts_x2.append(f"Question: {example['question']}, Answer: ")
 
+    dataset_name = "squad"
     metadata = {"dataset_name": dataset_name, "model_name": model_name}
     resume_x1 = None
     if checkpoint_dir:
