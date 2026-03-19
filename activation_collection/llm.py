@@ -130,7 +130,7 @@ def save_expert_activations(
         )
         token_counts = torch.zeros(num_token_indices, dtype=torch.long)
 
-    vocab_size = tokenizer.vocab_size
+    vocab_size = len(tokenizer)
     id_to_index = torch.full((vocab_size,), -1, dtype=torch.long, device=model_device)
     for tid, idx in token_id_to_index.items():
         if 0 <= tid < vocab_size:
@@ -415,7 +415,9 @@ class OLMoE7B:
 
     def __init__(self, model_name: ModelName) -> None:
         if model_name != "allenai/OLMoE-1B-7B-0125-Instruct":
-            raise ValueError("OLMoE1B7B only supports 'allenai/OLMoE-1B-7B-0125-Instruct'")
+            raise ValueError(
+                "OLMoE1B7B only supports 'allenai/OLMoE-1B-7B-0125-Instruct'"
+            )
 
         self.model_name: ModelName = model_name
         self.tokenizer = AutoTokenizer.from_pretrained(
