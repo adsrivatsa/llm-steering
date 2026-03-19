@@ -28,5 +28,5 @@ echo "Job started on $(hostname) at $(date)"
 echo "Running inference with LLM: $LLM_NAME on task: $TASK"
 
 # Run your script; assumes main.py accepts --llm and --dataset arguments.
-$PY_BIN collect_activations.py --llm "$LLM_NAME" --task "$TASK"
+$PY_BIN activation_collection/main.py --llm "$LLM_NAME" --task "$TASK"
 

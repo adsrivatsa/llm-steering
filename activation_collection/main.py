@@ -14,10 +14,6 @@ import torch
 def faithfulness_unique_token_ids(
     model_name: ModelName, split: str = "train"
 ) -> set[int]:
-    """
-    Collect the set of unique token IDs produced by `model_name`'s tokenizer
-    over all (document, question) pairs in the specified dataset split.
-    """
     dataset = SQuAD()
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,
@@ -40,14 +36,6 @@ def faithfulness_unique_token_ids(
 def build_token_index_lookup(
     task: str, model_name: ModelName, split: str = "train"
 ) -> tuple[dict[int, int], dict[int, int]]:
-    """
-    Build lookup tables between a dense local index space and the
-    (sparse) encoded token IDs that actually appear in the dataset.
-
-    Returns:
-        index_to_token_id: maps local index -> token ID
-        token_id_to_index: maps token ID -> local index
-    """
     if task == "faithfulness":
         unique_token_ids = sorted(faithfulness_unique_token_ids(model_name, split))
 
@@ -72,15 +60,6 @@ def save_expert_activations(
     checkpoint_metadata: dict[str, str] | None = None,
     resume_from: tuple[torch.Tensor, torch.Tensor, int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Run the model on the given prompts and collect, for each layer/expert/token,
-    the number of times that expert was selected for that token.
-
-    Returns:
-        expert_counts_by_token: tensor of shape [num_layers, num_experts, num_tokens]
-        token_counts: tensor of shape [num_tokens], giving how many times each
-                      token appears across all prompts.
-    """
     return moe_model.save_expert_activations(
         prompts,
         token_id_to_index,
@@ -99,28 +78,6 @@ def faithfulness_activations(
     checkpoint_dir: str | None = None,
     checkpoint_interval: int = checkpoint.INTERVAL,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """
-    Compute the risk-difference matrix for a given dataset and MoE model.
-
-    For now, only the 'faithfulness' task is supported.
-
-    Definitions:
-        x1 = \"Document: {document}, Question: {question}, Answer: \"
-        x2 = \"Question: {question}, Answer: \"
-
-        For a given expert e:
-            p1 = (# tokens in x1 for which e was selected) / (total tokens in x1)
-            p2 = (# tokens in x2 for which e was selected) / (total tokens in x2)
-            risk_diff = p1 - p2
-
-    Internally, we keep counts per (expert, token_index) and only aggregate
-    across tokens at the final step when computing risk differences.
-
-    Returns:
-        risk_diff: tensor of shape [num_layers, num_experts]
-        raw_state: dict with expert_counts_x1, expert_counts_x2, token_counts_x1,
-                   token_counts_x2 (unaggregated, for saving raw deltas).
-    """
     moe_model = get_moe_llm(model_name)
 
     dataset = SQuAD()
@@ -226,13 +183,7 @@ def faithfulness_activations(
 #     return dict(counter)
 
 
-def main(
-    task: str,
-    model_name: ModelName,
-) -> None:
-    # Build the token index lookup once and pass the mapping from
-    # token_id -> local index into the SteerMoE computation so we can
-    # track expert activations at the (expert, token) level.
+def main(task: str, model_name: ModelName, checkpoint_dir: str) -> None:
     _, token_id_to_index = build_token_index_lookup(
         task=task, model_name=model_name, split="train"
     )
@@ -241,7 +192,7 @@ def main(
         faithfulness_activations(
             model_name=model_name,
             token_id_to_index=token_id_to_index,
-            checkpoint_dir=checkpoint.DIR,
+            checkpoint_dir=checkpoint_dir,
             checkpoint_interval=checkpoint.INTERVAL,
         )
 
@@ -262,15 +213,14 @@ if __name__ == "__main__":
         "--model",
         dest="model_name",
         type=str,
-        default="allenai/OLMoE-1B-7B-0125",
+        default="allenai/OLMoE-1B-7B-0125-Instruct",
         help="Hugging Face model identifier for the MoE LLM.",
     )
+    parser.add_argument("--checkpoint-dir", type=str, default="activations")
 
     args = parser.parse_args()
     task: str = args.task
-    model_name: ModelName = args.model_name  # type: ignore[assignment]
+    model_name: ModelName = args.model_name
+    checkpoint_dir: str = args.checkpoint_dir
 
-    main(
-        task=task,
-        model_name=model_name,
-    )
+    main(task=task, model_name=model_name, checkpoint_dir=checkpoint_dir)
