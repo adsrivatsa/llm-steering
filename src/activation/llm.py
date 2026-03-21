@@ -4,21 +4,16 @@ import torch
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
 
-import checkpoint
-from device import device
+from src import checkpoint
+from src.device import device
 
 
 ModelName = Literal[
-    # OpenAI GPT-OSS series
     "openai/gpt-oss-20b",
     "openai/gpt-oss-120b",
-    # Qwen3
     "Qwen/Qwen3-30B-A3B",
-    # Mixtral
     "mistralai/Mixtral-8x7B-Instruct-v0.1",
-    # OLMoE
     "allenai/OLMoE-1B-7B-0125-Instruct",
-    # Phi
     "microsoft/Phi-3.5-MoE-instruct",
 ]
 
@@ -222,27 +217,22 @@ class GPT20B:
     top-k expert indices per token.
     """
 
-    def __init__(self, model_name: ModelName) -> None:
-        if model_name != "openai/gpt-oss-20b":
-            raise ValueError("GPT20MoELLM only supports 'openai/gpt-oss-20b'")
-
-        self.model_name: ModelName = model_name
+    def __init__(self) -> None:
+        self.model_name: ModelName = "openai/gpt-oss-20b"
         self.tokenizer = AutoTokenizer.from_pretrained(
-            model_name,
+            self.model_name,
             use_fast=True,
             trust_remote_code=True,
         )
 
         self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            self.model_name,
+            dtype="auto",
             device_map="auto",
         )
         self.model.eval()
 
-        # Use architecture-known values from MOE_CONFIG.
-        k_paper, num_experts_paper = MOE_CONFIG[model_name]
-        # Total experts per layer from paper; assume matches implementation.
+        k_paper, num_experts_paper = MOE_CONFIG[self.model_name]
         self.num_experts = int(num_experts_paper)
         self.k = int(k_paper)
         self.num_layers = len(self.model.model.layers)
@@ -286,27 +276,22 @@ class Qwen30B:
     logic or debugging without affecting other models.
     """
 
-    def __init__(self, model_name: ModelName) -> None:
-        if model_name != "Qwen/Qwen3-30B-A3B":
-            raise ValueError("Qwen30MoELLM only supports 'Qwen/Qwen3-30B-A3B'")
-
-        self.model_name: ModelName = model_name
+    def __init__(self) -> None:
+        self.model_name: ModelName = "Qwen/Qwen3-30B-A3B"
         self.tokenizer = AutoTokenizer.from_pretrained(
-            model_name,
+            self.model_name,
             use_fast=True,
             trust_remote_code=True,
         )
 
         self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            self.model_name,
+            dtype="auto",
             device_map="auto",
         )
         self.model.eval()
 
-        # Use architecture-known values from MOE_CONFIG.
-        k_paper, num_experts_paper = MOE_CONFIG[model_name]
-        # Total experts per layer from paper; assume matches implementation.
+        k_paper, num_experts_paper = MOE_CONFIG[self.model_name]
         self.num_experts = int(num_experts_paper)
         self.k = int(k_paper)
         self.num_layers = len(self.model.model.layers)
@@ -350,28 +335,22 @@ class Mixtral8x7B:
     accumulate per-token expert activation counts.
     """
 
-    def __init__(self, model_name: ModelName) -> None:
-        if model_name != "mistralai/Mixtral-8x7B-Instruct-v0.1":
-            raise ValueError(
-                "Mixtral8x7B only supports 'mistralai/Mixtral-8x7B-Instruct-v0.1'"
-            )
-
-        self.model_name: ModelName = model_name
+    def __init__(self) -> None:
+        self.model_name: ModelName = "mistralai/Mixtral-8x7B-Instruct-v0.1"
         self.tokenizer = AutoTokenizer.from_pretrained(
-            model_name,
+            self.model_name,
             use_fast=True,
             trust_remote_code=True,
         )
 
         self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            self.model_name,
+            dtype="auto",
             device_map="auto",
         )
         self.model.eval()
 
-        # Use architecture-known values from MOE_CONFIG.
-        k_paper, num_experts_paper = MOE_CONFIG[model_name]
+        k_paper, num_experts_paper = MOE_CONFIG[self.model_name]
         self.num_experts = int(num_experts_paper)
         self.k = int(k_paper)
         self.num_layers = len(self.model.model.layers)
@@ -413,28 +392,22 @@ class OLMoE7B:
     OLMoE routing is exposed via the MoE gate on each decoder layer.
     """
 
-    def __init__(self, model_name: ModelName) -> None:
-        if model_name != "allenai/OLMoE-1B-7B-0125-Instruct":
-            raise ValueError(
-                "OLMoE1B7B only supports 'allenai/OLMoE-1B-7B-0125-Instruct'"
-            )
-
-        self.model_name: ModelName = model_name
+    def __init__(self) -> None:
+        self.model_name: ModelName = "allenai/OLMoE-1B-7B-0125-Instruct"
         self.tokenizer = AutoTokenizer.from_pretrained(
-            model_name,
+            self.model_name,
             use_fast=True,
             trust_remote_code=True,
         )
 
         self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            self.model_name,
+            dtype="auto",
             device_map="auto",
         )
         self.model.eval()
 
-        # Use architecture-known values from MOE_CONFIG.
-        k_paper, num_experts_paper = MOE_CONFIG[model_name]
+        k_paper, num_experts_paper = MOE_CONFIG[self.model_name]
         self.num_experts = int(num_experts_paper)
         self.k = int(k_paper)
         self.num_layers = len(self.model.model.layers)
@@ -476,26 +449,22 @@ class Phi42B:
     Phi-3.5 MoE routing is exposed via the MoE gate on each decoder layer.
     """
 
-    def __init__(self, model_name: ModelName) -> None:
-        if model_name != "microsoft/Phi-3.5-MoE-instruct":
-            raise ValueError("Phi35MoE only supports 'microsoft/Phi-3.5-MoE-instruct'")
-
-        self.model_name: ModelName = model_name
+    def __init__(self) -> None:
+        self.model_name: ModelName = "microsoft/Phi-3.5-MoE-instruct"
         self.tokenizer = AutoTokenizer.from_pretrained(
-            model_name,
+            self.model_name,
             use_fast=True,
             trust_remote_code=True,
         )
 
         self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            self.model_name,
+            dtype="auto",
             device_map="auto",
         )
         self.model.eval()
 
-        # Use architecture-known values from MOE_CONFIG.
-        k_paper, num_experts_paper = MOE_CONFIG[model_name]
+        k_paper, num_experts_paper = MOE_CONFIG[self.model_name]
         self.num_experts = int(num_experts_paper)
         self.k = int(k_paper)
         self.num_layers = len(self.model.model.layers)
@@ -544,15 +513,15 @@ def get_moe_llm(model_name: ModelName):
     Other model names are not yet implemented.
     """
     if model_name == "openai/gpt-oss-20b":
-        return GPT20B(model_name=model_name)
+        return GPT20B()
     if model_name == "Qwen/Qwen3-30B-A3B":
-        return Qwen30B(model_name=model_name)
+        return Qwen30B()
     if model_name == "mistralai/Mixtral-8x7B-Instruct-v0.1":
-        return Mixtral8x7B(model_name=model_name)
+        return Mixtral8x7B()
     if model_name == "allenai/OLMoE-1B-7B-0125-Instruct":
-        return OLMoE7B(model_name=model_name)
+        return OLMoE7B()
     if model_name == "microsoft/Phi-3.5-MoE-instruct":
-        return Phi42B(model_name=model_name)
+        return Phi42B()
 
     raise NotImplementedError(
         f"MoE wrapper not implemented for model {model_name!r}. "

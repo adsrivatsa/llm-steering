@@ -4,10 +4,20 @@ from tqdm.auto import tqdm
 import torch
 from transformers import AutoTokenizer
 
-from activation_collection import checkpoint
-from llm import ModelName
-from activation_collection.dataset import SQuAD
-from inference import faitheval_couterfactual_inference
+from src import checkpoint
+from src.inference.llm import ModelName
+from src.activation.dataset import SQuAD
+from src.inference.inference import faitheval_couterfactual_inference
+
+# Paper Table A.2: number of experts to activate/deactivate per model for faithfulness steering.
+FAITHFULNESS_EXPERT_CONFIG: dict[str, dict[str, int]] = {
+    "openai/gpt-oss-120b": {"n_activate": 5, "n_deactivate": 100},
+    "openai/gpt-oss-20b": {"n_activate": 10, "n_deactivate": 50},
+    "mistralai/Mixtral-8x7B-Instruct-v0.1": {"n_activate": 10, "n_deactivate": 100},
+    "allenai/OLMoE-1B-7B-0125-Instruct": {"n_activate": 0, "n_deactivate": 50},
+    "microsoft/Phi-3.5-MoE-instruct": {"n_activate": 10, "n_deactivate": 75},
+    "Qwen/Qwen3-30B-A3B": {"n_activate": 0, "n_deactivate": 500},
+}
 
 
 def faithfulness_unique_token_ids(
@@ -54,6 +64,7 @@ def main(
     dataset: str,
     activations_dir: str,
     inference_dir: str,
+    no_steering: bool = False,
 ):
     # _, token_id_to_index = build_token_index_lookup(
     #     task=task, model_name=model_name, split="train"
@@ -78,16 +89,22 @@ def main(
     delta = torch.nan_to_num(p1) - torch.nan_to_num(p2)
 
     if task == "faithfulness":
+        expert_cfg = FAITHFULNESS_EXPERT_CONFIG[model_name]
+
         if dataset == "faitheval_counterfactual":
             faitheval_couterfactual_inference(
                 model_name=model_name,
                 checkpoint_dir=inference_dir,
-                pass_name="steered",
-                deltas_per_layer=delta,
-                n_activate=0,
-                n_deactivate=50,
-                max_new_tokens=32,
+                pass_name="unsteered" if no_steering else "steered",
+                deltas_per_layer=None if no_steering else delta,
+                n_activate=expert_cfg["n_activate"],
+                n_deactivate=expert_cfg["n_deactivate"],
+                max_new_tokens=1024,
                 batch_size=4,
+                chat_template_kwargs={
+                    "enable_thinking": False,
+                    "reasoning_effort": "low",
+                },
             )
 
 
@@ -116,13 +133,17 @@ if __name__ == "__main__":
         "--model",
         dest="model_name",
         type=str,
-        default="allenai/OLMoE-1B-7B-0125-Instruct",
+        default="microsoft/Phi-3.5-MoE-instruct",
         help="Hugging Face model identifier for the MoE LLM.",
     )
-    parser.add_argument(
-        "--activations-dir", type=str, default="activation_collection/activations"
-    )
+    parser.add_argument("--activations-dir", type=str, default="activations")
     parser.add_argument("--inference-dir", type=str, default="inference")
+    parser.add_argument(
+        "--no-steering",
+        action="store_true",
+        default=False,
+        help="Run inference without any expert steering (baseline pass).",
+    )
 
     args = parser.parse_args()
     task: str = args.task
@@ -130,6 +151,7 @@ if __name__ == "__main__":
     dataset: str = args.dataset
     activations_dir: str = args.activations_dir
     inference_dir: str = args.inference_dir
+    no_steering: bool = args.no_steering
 
     main(
         task=task,
@@ -137,4 +159,5 @@ if __name__ == "__main__":
         dataset=dataset,
         activations_dir=activations_dir,
         inference_dir=inference_dir,
+        no_steering=no_steering,
     )

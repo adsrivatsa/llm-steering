@@ -1,12 +1,9 @@
-from collections import Counter
-import os
 import argparse
-from typing import Literal
 
 from tqdm.auto import tqdm
-import checkpoint
-from dataset import SQuAD
-from llm import ModelName, get_moe_llm
+from src import checkpoint
+from src.activation.dataset import SQuAD
+from src.activation.llm import ModelName, get_moe_llm
 from transformers import AutoTokenizer
 import torch
 
@@ -23,12 +20,9 @@ def faithfulness_unique_token_ids(
 
     unique_token_ids: set[int] = set()
     for example in tqdm(dataset, desc="Collecting unique tokens"):
-        for prompt in (
-            f"Document: {example['context']}, Question: {example['question']}, Answer: ",
-            f"Question: {example['question']}, Answer: ",
-        ):
-            encoded = tokenizer(prompt, add_special_tokens=True)["input_ids"]
-            unique_token_ids.update(encoded)
+        prompt = f"Question: {example['question']}, Answer: "
+        encoded = tokenizer(prompt, add_special_tokens=True)["input_ids"]
+        unique_token_ids.update(encoded)
 
     return unique_token_ids
 
@@ -154,35 +148,6 @@ def faithfulness_activations(
     return expert_counts_x1, token_counts_x1, expert_counts_x2, token_counts_x2
 
 
-# def faithfulness_frequency_table(
-#     model_name: ModelName, split: str = "train"
-# ) -> dict[int, int]:
-#     """
-#     Build a frequency table mapping token ID -> count across the dataset
-#     for the given model's tokenizer.
-#     """
-#     dataset = SQuAD()
-#     tokenizer = AutoTokenizer.from_pretrained(
-#         model_name,
-#         use_fast=True,
-#         trust_remote_code=True,
-#     )
-
-#     counter: Counter[int] = Counter()
-#     for example in tqdm(
-#         dataset, desc=f"Building frequency table ({dataset_name}, {split})"
-#     ):
-#         for prompt in (
-#             f"Document: {example['context']}, Question: {example['question']}, Answer: ",
-#             f"Question: {example['question']}, Answer: ",
-#         ):
-#             input_ids = tokenizer(prompt, add_special_tokens=True)["input_ids"]
-#             counter.update(input_ids)
-
-#     # Convert Counter to a plain dict[int, int]
-#     return dict(counter)
-
-
 def main(task: str, model_name: ModelName, checkpoint_dir: str) -> None:
     _, token_id_to_index = build_token_index_lookup(
         task=task, model_name=model_name, split="train"
@@ -198,23 +163,19 @@ def main(task: str, model_name: ModelName, checkpoint_dir: str) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Compute and save raw SteerMoE activations."
-    )
+    parser = argparse.ArgumentParser()
     parser.add_argument(
         "--task",
         type=str,
         choices=["faithfulness"],
         default="faithfulness",
-        help="Task to collect expert activations on.",
     )
     parser.add_argument(
         "--llm",
         "--model",
         dest="model_name",
         type=str,
-        default="allenai/OLMoE-1B-7B-0125-Instruct",
-        help="Hugging Face model identifier for the MoE LLM.",
+        default="openai/gpt-oss-20b",
     )
     parser.add_argument("--checkpoint-dir", type=str, default="activations")
 

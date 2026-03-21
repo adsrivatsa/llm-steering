@@ -1,13 +1,3 @@
-"""
-Raw activation checkpoint utilities for SteerMoE.
-
-This module intentionally only supports saving/loading raw per-pass activations:
-- expert_counts_by_token
-- token_counts
-"""
-
-from __future__ import annotations
-
 import os
 from typing import Any
 
@@ -17,18 +7,18 @@ INTERVAL = 50
 RAW_FILE_SUFFIX = ".pt"
 
 
-def _model_name_safe(model_name: str) -> str:
+def safe_model_name(model_name: str) -> str:
     return model_name.replace("/", "_")
 
 
-def _raw_path(
+def raw_path(
     raw_dir: str,
     dataset_name: str,
     model_name: str,
     pass_name: str,
 ) -> str:
     """Single path per (dataset, model, pass); overwritten on each save."""
-    model_safe = _model_name_safe(model_name)
+    model_safe = safe_model_name(model_name)
     return os.path.join(
         raw_dir,
         dataset_name,
@@ -45,7 +35,7 @@ def save(
     model_name: str,
     step: int | None = None,
 ) -> str:
-    path = _raw_path(raw_dir, dataset_name, model_name, pass_name)
+    path = raw_path(raw_dir, dataset_name, model_name, pass_name)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp_path = path + ".tmp"
     state["step"] = step
@@ -60,7 +50,7 @@ def load(
     dataset_name: str,
     model_name: str,
 ) -> dict[str, Any] | None:
-    path = _raw_path(raw_dir, dataset_name, model_name, pass_name)
+    path = raw_path(raw_dir, dataset_name, model_name, pass_name)
     if not os.path.isfile(path):
         return None
 
