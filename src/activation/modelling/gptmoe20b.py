@@ -210,21 +210,7 @@ class MLPBlock(torch.nn.Module):
 
         # * Added
 
-        router_logits = g
-        moe_manual_weights = self.steermoe_manual_weights.to(router_logits.device)
-        eps = self.eps
-
-        router_logits = torch.nn.functional.log_softmax(router_logits, dim=-1)
-
-        s_max = router_logits.max(dim=-1).values.unsqueeze(-1)
-        s_min = router_logits.min(dim=-1).values.unsqueeze(-1)
-        pos_mask = (moe_manual_weights > 0).unsqueeze(0)
-        neg_mask = (moe_manual_weights < 0).unsqueeze(0)
-
-        router_logits[:, pos_mask.squeeze(0)] = s_max + eps
-        router_logits[:, neg_mask.squeeze(0)] = s_min - eps
-
-        g = router_logits
+        self.activation_logits = g.clone()
 
         # * Added
 
@@ -1222,27 +1208,15 @@ class GptOssForCausalLM(
             self.model.make_empty_intermediate_tensors
         )
 
-        # * Added
-
-        zero_manual_weights = torch.zeros(
-            self.config.num_hidden_layers, self.config.num_local_experts
-        )
-        self.add_steermoe_manual_args(zero_manual_weights, 0)
-
-        # * Added
-
-    # * Added
-
-    def add_steermoe_manual_args(self, manual_weights, eps):
-        """
-        manual_weights: Tensor of shape (layers, experts)
-        """
-        for layer_idx, layer in enumerate(self.model.layers):
-            layer_moe_block = layer.mlp
-            layer_moe_block.steermoe_manual_weights = manual_weights[layer_idx]
-            layer_moe_block.eps = eps
-
-    # * Added
+    def expert_activations(self) -> torch.Tensor:
+        activations = []
+        for layer in self.model.layers:
+            expert_activations = layer.mlp.activation_logits.to(
+                dtype=torch.float32
+            ).cpu()
+            expert_activations = expert_activations.permute(1, 0)
+            activations.append(expert_activations)
+        return torch.stack(activations)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)

@@ -69,4 +69,4 @@ packages = ["src"]
 
 # Loaded by vLLM in every process (including TP workers) via load_general_plugins().
 [project.entry-points."vllm.general_plugins"]
-steermoe_gpt_oss = "src.steermoe.vllm_plugin:register"
+llm_registration = "src.vllm_plugin:register"

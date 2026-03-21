@@ -1,28 +1,216 @@
 import argparse
+import os
 
-from tqdm.auto import tqdm
+from transformers import AutoTokenizer
+
+
+os.environ["LLM_REGISTRATION"] = "activation"
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
+os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
+
+import torch
+from tqdm.std import tqdm
+from typing import Literal, Tuple
+from vllm import LLM, SamplingParams
+
 from src import checkpoint
 from src.activation.dataset import SQuAD
-from src.activation.llm import ModelName, get_moe_llm
-from transformers import AutoTokenizer
-import torch
+from src.vllm_plugin import register as register_vllm_models
+
+
+ModelName = Literal[
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
+    "Qwen/Qwen3-30B-A3B",
+    "mistralai/Mixtral-8x7B-Instruct-v0.1",
+    "allenai/OLMoE-1B-7B-0125-Instruct",
+    "microsoft/Phi-3.5-MoE-instruct",
+]
+
+MOE_EXPERT_CONFIG: dict[ModelName, Tuple[int, int]] = {
+    "openai/gpt-oss-20b": (24, 4, 32),
+    "openai/gpt-oss-120b": (36, 4, 128),
+    "Qwen/Qwen3-30B-A3B": (48, 8, 128),
+    "mistralai/Mixtral-8x7B-Instruct-v0.1": (32, 2, 8),
+    "allenai/OLMoE-1B-7B-0125-Instruct": (16, 8, 64),
+    "microsoft/Phi-3.5-MoE-instruct": (32, 2, 16),
+}
+
+
+def collect_prompt_activations(
+    llm: LLM,
+    dataset_name: str,
+    pass_name: str,
+    prompts: list[Tuple[str, int]],
+    token_id_to_index: dict[int, int],
+    *,
+    checkpoint_dir: str | None = None,
+    checkpoint_interval: int = checkpoint.INTERVAL,
+):
+    model_name = llm.model_config.model
+
+    layers, k, experts = MOE_EXPERT_CONFIG[model_name]
+
+    A = torch.zeros(layers, experts, len(token_id_to_index))
+    N = torch.zeros(len(token_id_to_index), dtype=torch.long)
+
+    start_step = 0
+    if checkpoint_dir:
+        loaded = checkpoint.load(
+            raw_dir=checkpoint_dir,
+            pass_name=pass_name,
+            dataset_name=dataset_name,
+            model_name=model_name,
+        )
+        if loaded:
+            start_step = int(loaded.get("step", 0))
+            if start_step > 0:
+                A = loaded["A"]
+                N = loaded["N"]
+                remaining = max(0, len(prompts) - start_step)
+                print(
+                    f"Resuming {pass_name} from prompt {start_step}, {remaining} remaining"
+                )
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    sampling_params = SamplingParams(
+        temperature=0, top_p=0.8, top_k=1, min_p=0, max_tokens=1, seed=0
+    )
+
+    for idx, prompt in tqdm(
+        enumerate(prompts[start_step:]),
+        desc=f"Running MoE inference: {model_name} {dataset_name} {pass_name}",
+        total=len(prompts) - start_step,
+    ):
+        prompt, q_len = prompt
+        message = [{"role": "user", "content": prompt}]
+        _ = llm.chat(
+            message,
+            sampling_params,
+            use_tqdm=False,
+            chat_template_kwargs={"enable_thinking": False, "reasoning_effort": "low"},
+        )
+
+        activation_logits = llm.collective_rpc(
+            lambda self: self.model_runner.model.expert_activations()
+        )[0]
+        activation_logits = activation_logits[:, :, -q_len:]  # [layers, experts, q_len]
+
+        # Top-k expert indices per (layer, token): [layers, k, q_len]
+        top_k_indices = torch.topk(activation_logits, k, dim=1).indices
+
+        # Binary mask: 1 where expert was among top-k, shape [layers, experts, q_len]
+        expert_mask = torch.zeros(layers, experts, q_len, dtype=torch.float32)
+        expert_mask.scatter_(1, top_k_indices, 1.0)
+
+        # Get token IDs for the question tokens (last q_len tokens of the full prompt)
+        prompt_token_ids = tokenizer(prompt, add_special_tokens=True)["input_ids"]
+        question_token_ids = prompt_token_ids[-q_len:]
+
+        # Filter to positions whose token IDs are in the index map
+        valid_positions = [
+            i for i, tid in enumerate(question_token_ids) if tid in token_id_to_index
+        ]
+        token_indices = torch.tensor(
+            [token_id_to_index[question_token_ids[i]] for i in valid_positions],
+            dtype=torch.long,
+        )
+
+        # Accumulate: A1[layer, expert, token_index] += 1 for each activated (layer, expert, token)
+        A.index_add_(2, token_indices, expert_mask[:, :, valid_positions])
+
+        # Count occurrences of each token across all question prompts
+        N.index_add_(0, token_indices, torch.ones(len(token_indices), dtype=torch.long))
+
+        if checkpoint_dir and (start_step + idx + 1) % checkpoint_interval == 0:
+            checkpoint.save(
+                raw_dir=checkpoint_dir,
+                pass_name=pass_name,
+                state={"A": A, "N": N},
+                dataset_name=dataset_name,
+                model_name=model_name,
+                step=start_step + idx + 1,
+            )
+
+    return A, N
+
+
+def faithfulness_activations(
+    model_name: ModelName,
+    token_id_to_index: dict[int, int],
+    *,
+    checkpoint_dir: str | None = None,
+    checkpoint_interval: int = checkpoint.INTERVAL,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+
+    dataset = SQuAD()
+
+    prompts_x1: list[Tuple[str, int]] = []
+    prompts_x2: list[str] = []
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    for example in tqdm(dataset, desc="Building prompts"):
+        document = f"Document: {example['context']}"
+        question = f"Question: {example['question']}"
+
+        x1 = f"{document} {question}"
+        x2 = f"{question}"
+
+        q_len = len(tokenizer(" " + question, add_special_tokens=True)["input_ids"])
+        prompts_x1.append((x1, q_len))
+        prompts_x2.append((x2, q_len))
+
+    llm = LLM(
+        model=model_name,
+        # max_seq_len_to_capture=4096,
+        max_model_len=4096,
+        tensor_parallel_size=torch.cuda.device_count(),
+        max_num_seqs=1,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        trust_remote_code=True,
+    )
+
+    A1, N1 = collect_prompt_activations(
+        llm=llm,
+        dataset_name="squad",
+        pass_name="x1",
+        prompts=prompts_x1,
+        token_id_to_index=token_id_to_index,
+        checkpoint_dir=checkpoint_dir,
+        checkpoint_interval=checkpoint_interval,
+    )
+    A2, N2 = collect_prompt_activations(
+        llm=llm,
+        dataset_name="squad",
+        pass_name="x2",
+        prompts=prompts_x2,
+        token_id_to_index=token_id_to_index,
+        checkpoint_dir=checkpoint_dir,
+        checkpoint_interval=checkpoint_interval,
+    )
+
+    return A1, N1, A2, N2
 
 
 def faithfulness_unique_token_ids(
     model_name: ModelName, split: str = "train"
 ) -> set[int]:
     dataset = SQuAD()
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_name,
-        use_fast=True,
-        trust_remote_code=True,
-    )
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     unique_token_ids: set[int] = set()
     for example in tqdm(dataset, desc="Collecting unique tokens"):
-        prompt = f"Question: {example['question']}, Answer: "
-        encoded = tokenizer(prompt, add_special_tokens=True)["input_ids"]
-        unique_token_ids.update(encoded)
+        for prompt in [
+            f"Question: {example['question']}, Answer: ",
+            f" Question: {example['question']}, Answer: ",
+        ]:
+            encoded = tokenizer(prompt, add_special_tokens=True)["input_ids"]
+            unique_token_ids.update(encoded)
 
     return unique_token_ids
 
@@ -43,123 +231,16 @@ def build_token_index_lookup(
     return index_to_token_id, token_id_to_index
 
 
-def save_expert_activations(
-    prompts: list[str],
-    moe_model,
-    token_id_to_index: dict[int, int],
-    *,
-    checkpoint_dir: str | None = None,
-    checkpoint_interval: int = checkpoint.INTERVAL,
-    checkpoint_pass_name: str = "",
-    checkpoint_metadata: dict[str, str] | None = None,
-    resume_from: tuple[torch.Tensor, torch.Tensor, int] | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return moe_model.save_expert_activations(
-        prompts,
-        token_id_to_index,
+def main(task: str, model_name: ModelName, checkpoint_dir: str):
+    register_vllm_models()
+
+    _, token_id_to_idx = build_token_index_lookup(task=task, model_name=model_name)
+
+    faithfulness_activations(
+        model_name=model_name,
+        token_id_to_index=token_id_to_idx,
         checkpoint_dir=checkpoint_dir,
-        checkpoint_interval=checkpoint_interval,
-        checkpoint_pass_name=checkpoint_pass_name,
-        checkpoint_metadata=checkpoint_metadata,
-        resume_from=resume_from,
     )
-
-
-def faithfulness_activations(
-    model_name: ModelName,
-    token_id_to_index: dict[int, int],
-    *,
-    checkpoint_dir: str | None = None,
-    checkpoint_interval: int = checkpoint.INTERVAL,
-) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    moe_model = get_moe_llm(model_name)
-
-    dataset = SQuAD()
-
-    prompts_x1: list[str] = []
-    prompts_x2: list[str] = []
-
-    for example in tqdm(dataset, desc="Building prompts"):
-        prompts_x1.append(
-            f"Document: {example['context']}, Question: {example['question']}, Answer: "
-        )
-        prompts_x2.append(f"Question: {example['question']}, Answer: ")
-
-    dataset_name = "squad"
-    metadata = {"dataset_name": dataset_name, "model_name": model_name}
-    resume_x1 = None
-    if checkpoint_dir:
-        loaded_x1 = checkpoint.load(
-            checkpoint_dir,
-            pass_name="x1",
-            dataset_name=dataset_name,
-            model_name=model_name,
-        )
-        if loaded_x1 is not None:
-            step = int(loaded_x1.get("step") or 0)
-            if step > 0:
-                resume_x1 = (
-                    loaded_x1["expert_counts_by_token"],
-                    loaded_x1["token_counts"],
-                    step,
-                )
-                remaining = max(0, len(prompts_x1) - step)
-                print(f"Resuming x1 from prompt {step} ({remaining} remaining)")
-
-    expert_counts_x1, token_counts_x1 = moe_model.save_expert_activations(
-        prompts_x1,
-        token_id_to_index=token_id_to_index,
-        checkpoint_dir=checkpoint_dir,
-        checkpoint_interval=checkpoint_interval,
-        checkpoint_pass_name="x1",
-        checkpoint_metadata=metadata,
-        resume_from=resume_x1,
-    )
-
-    resume_x2 = None
-    if checkpoint_dir:
-        loaded_x2 = checkpoint.load(
-            checkpoint_dir,
-            pass_name="x2",
-            dataset_name=dataset_name,
-            model_name=model_name,
-        )
-        if loaded_x2 is not None:
-            step = int(loaded_x2.get("step") or 0)
-            if step > 0:
-                resume_x2 = (
-                    loaded_x2["expert_counts_by_token"],
-                    loaded_x2["token_counts"],
-                    step,
-                )
-                remaining = max(0, len(prompts_x2) - step)
-                print(f"Resuming x2 from prompt {step} ({remaining} remaining)")
-
-    expert_counts_x2, token_counts_x2 = moe_model.save_expert_activations(
-        prompts_x2,
-        token_id_to_index=token_id_to_index,
-        checkpoint_dir=checkpoint_dir,
-        checkpoint_interval=checkpoint_interval,
-        checkpoint_pass_name="x2",
-        checkpoint_metadata=metadata,
-        resume_from=resume_x2,
-    )
-
-    return expert_counts_x1, token_counts_x1, expert_counts_x2, token_counts_x2
-
-
-def main(task: str, model_name: ModelName, checkpoint_dir: str) -> None:
-    _, token_id_to_index = build_token_index_lookup(
-        task=task, model_name=model_name, split="train"
-    )
-
-    if task == "faithfulness":
-        faithfulness_activations(
-            model_name=model_name,
-            token_id_to_index=token_id_to_index,
-            checkpoint_dir=checkpoint_dir,
-            checkpoint_interval=checkpoint.INTERVAL,
-        )
 
 
 if __name__ == "__main__":
