@@ -15,6 +15,10 @@ def register_activation_models():
         "GptOssForCausalLM", "src.activation.modelling.gptmoe20b:GptOssForCausalLM"
     )
 
+    ModelRegistry.register_model(
+        "OlmoeForCausalLM", "src.activation.modelling.olmoe7b:OlmoeForCausalLM"
+    )
+
 
 def register_steermoe_models():
     from vllm.model_executor.models import ModelRegistry

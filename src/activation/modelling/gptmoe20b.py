@@ -1208,6 +1208,8 @@ class GptOssForCausalLM(
             self.model.make_empty_intermediate_tensors
         )
 
+    # * Added
+
     def expert_activations(self) -> torch.Tensor:
         activations = []
         for layer in self.model.layers:
@@ -1217,6 +1219,8 @@ class GptOssForCausalLM(
             expert_activations = expert_activations.permute(1, 0)
             activations.append(expert_activations)
         return torch.stack(activations)
+
+    # * Added
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)

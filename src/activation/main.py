@@ -6,7 +6,6 @@ from transformers import AutoTokenizer
 
 os.environ["LLM_REGISTRATION"] = "activation"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
 os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
 
@@ -256,7 +255,7 @@ if __name__ == "__main__":
         "--model",
         dest="model_name",
         type=str,
-        default="openai/gpt-oss-20b",
+        default="allenai/OLMoE-1B-7B-0125-Instruct",
     )
     parser.add_argument("--checkpoint-dir", type=str, default="activations")
 
