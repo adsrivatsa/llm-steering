@@ -1,7 +1,7 @@
 import argparse
 import os
 
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 
 
 os.environ["LLM_REGISTRATION"] = "activation"
@@ -11,7 +11,7 @@ os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
 
 import torch
 from tqdm.std import tqdm
-from typing import Literal, Tuple
+from typing import Literal
 from vllm import LLM, SamplingParams
 
 from src import checkpoint
@@ -28,7 +28,7 @@ ModelName = Literal[
     "microsoft/Phi-3.5-MoE-instruct",
 ]
 
-MOE_EXPERT_CONFIG: dict[ModelName, Tuple[int, int]] = {
+MOE_EXPERT_CONFIG: dict[ModelName, tuple[int, int, int]] = {
     "openai/gpt-oss-20b": (24, 4, 32),
     "openai/gpt-oss-120b": (36, 4, 128),
     "Qwen/Qwen3-30B-A3B": (48, 8, 128),
@@ -38,11 +38,36 @@ MOE_EXPERT_CONFIG: dict[ModelName, Tuple[int, int]] = {
 }
 
 
+def resolve_parallelism(model_name: str) -> tuple[int, int]:
+    """Return (tensor_parallel_size, pipeline_parallel_size) for the available GPUs.
+
+    Prefers full tensor parallelism. Falls back to full pipeline parallelism when
+    the number of KV attention heads is not divisible by the GPU count (e.g. 3 GPUs).
+    """
+    n_gpus = torch.cuda.device_count()
+    print(n_gpus)
+    if n_gpus <= 1:
+        return 1, 1
+
+    config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+    # num_key_value_heads is the binding TP constraint; fall back to full heads for MHA models
+    kv_heads = getattr(
+        config,
+        "num_key_value_heads",
+        getattr(config, "num_attention_heads", None),
+    )
+
+    if kv_heads is not None and kv_heads % n_gpus == 0:
+        return n_gpus, 1  # tensor parallelism
+
+    return 1, n_gpus  # pipeline parallelism
+
+
 def collect_prompt_activations(
     llm: LLM,
     dataset_name: str,
     pass_name: str,
-    prompts: list[Tuple[str, int]],
+    prompts: list[tuple[str, int]],
     token_id_to_index: dict[int, int],
     *,
     checkpoint_dir: str | None = None,
@@ -154,12 +179,12 @@ def faithfulness_activations(
     *,
     checkpoint_dir: str | None = None,
     checkpoint_interval: int = checkpoint.INTERVAL,
-) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 
     dataset = SQuAD()
 
-    prompts_x1: list[Tuple[str, int]] = []
-    prompts_x2: list[str] = []
+    prompts_x1: list[tuple[str, int]] = []
+    prompts_x2: list[tuple[str, int]] = []
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
@@ -174,11 +199,14 @@ def faithfulness_activations(
         prompts_x1.append((x1, q_len))
         prompts_x2.append((x2, q_len))
 
+    tp, pp = resolve_parallelism(model_name)
+    print(f"Parallelism: tensor_parallel_size={tp}, pipeline_parallel_size={pp}")
+
     llm = LLM(
         model=model_name,
-        # max_seq_len_to_capture=4096,
         max_model_len=4096,
-        tensor_parallel_size=torch.cuda.device_count(),
+        tensor_parallel_size=tp,
+        pipeline_parallel_size=pp,
         max_num_seqs=1,
         enforce_eager=True,
         enable_prefix_caching=False,
@@ -207,9 +235,7 @@ def faithfulness_activations(
     return A1, N1, A2, N2
 
 
-def faithfulness_unique_token_ids(
-    model_name: ModelName, split: str = "train"
-) -> set[int]:
+def faithfulness_unique_token_ids(model_name: ModelName) -> set[int]:
     dataset = SQuAD()
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
@@ -226,10 +252,10 @@ def faithfulness_unique_token_ids(
 
 
 def build_token_index_lookup(
-    task: str, model_name: ModelName, split: str = "train"
+    task: str, model_name: ModelName
 ) -> tuple[dict[int, int], dict[int, int]]:
     if task == "faithfulness":
-        unique_token_ids = sorted(faithfulness_unique_token_ids(model_name, split))
+        unique_token_ids = sorted(faithfulness_unique_token_ids(model_name))
 
     index_to_token_id: dict[int, int] = {}
     token_id_to_index: dict[int, int] = {}
