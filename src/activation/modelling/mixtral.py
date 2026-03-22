@@ -155,7 +155,11 @@ class MixtralMoE(nn.Module):
 
         # * Added
 
-        self.activation_logits = router_logits.clone()
+        if hasattr(self, "save_dir"):
+            torch.save(
+                router_logits.clone().detach().cpu(),
+                f"{self.save_dir}/{self.layer_idx}.pt",
+            )
 
         # * Added
 
@@ -563,15 +567,13 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
 
     # * Added
 
-    def expert_activations(self) -> torch.Tensor:
-        activations = []
-        for layer in self.model.layers:
-            expert_activations = layer.block_sparse_moe.activation_logits.to(
-                dtype=torch.float32
-            ).cpu()
-            expert_activations = expert_activations.permute(1, 0)
-            activations.append(expert_activations)
-        return torch.stack(activations)
+    def add_save_dir(self, save_dir: str):
+        for layer_idx, layer in enumerate(self.model.layers):
+            if not hasattr(layer, "block_sparse_moe"):
+                continue
+
+            layer.block_sparse_moe.save_dir = save_dir
+            layer.block_sparse_moe.layer_idx = layer_idx
 
     # * Added
 

@@ -6,7 +6,6 @@ from transformers import AutoConfig, AutoTokenizer
 
 os.environ["LLM_REGISTRATION"] = "activation"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
 os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
 
@@ -154,6 +153,11 @@ def collect_prompt_activations(
         temperature=0, top_p=0.8, top_k=1, min_p=0, max_tokens=1, seed=0
     )
 
+    raw_save_dir = f"{checkpoint_dir}/raw/{checkpoint.safe_model_name(model_name)}"
+    os.makedirs(raw_save_dir, exist_ok=True)
+
+    llm.collective_rpc(lambda self: self.model_runner.model.add_save_dir(raw_save_dir))
+
     for idx, prompt in tqdm(
         enumerate(prompts[start_step:]),
         desc=f"Running MoE inference: {model_name} {dataset_name} {pass_name}",
@@ -168,11 +172,15 @@ def collect_prompt_activations(
             chat_template_kwargs={"enable_thinking": False, "reasoning_effort": "low"},
         )
 
-        activation_logits = llm.collective_rpc(
-            lambda self: self.model_runner.model.expert_activations()
-        )[0]
-        # Slice exactly the question token positions within the full
-        # chat-formatted sequence, as computed by find_question_token_range.
+        expert_activations = []
+        for activations_file in sorted(
+            os.listdir(raw_save_dir), key=lambda f: int(os.path.splitext(f)[0])
+        ):
+            activations_path = os.path.join(raw_save_dir, activations_file)
+            activations = torch.load(activations_path)
+            expert_activations.append(activations)
+        activation_logits = torch.stack(expert_activations).permute(0, 2, 1)
+
         activation_logits = activation_logits[
             :, :, q_start:q_end
         ]  # [layers, experts, q_len]

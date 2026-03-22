@@ -115,7 +115,11 @@ class OlmoeMoE(nn.Module):
 
         # * Added
 
-        self.activation_logits = router_logits.clone()
+        if hasattr(self, "save_dir"):
+            torch.save(
+                router_logits.clone().detach().cpu(),
+                f"{self.save_dir}/{self.layer_idx}.pt",
+            )
 
         # * Added
 
@@ -480,15 +484,13 @@ class OlmoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
 
     # * Added
 
-    def expert_activations(self) -> torch.Tensor:
-        activations = []
-        for layer in self.model.layers:
-            expert_activations = layer.mlp.activation_logits.to(
-                dtype=torch.float32
-            ).cpu()
-            expert_activations = expert_activations.permute(1, 0)
-            activations.append(expert_activations)
-        return torch.stack(activations)
+    def add_save_dir(self, save_dir: str):
+        for layer_idx, layer in enumerate(self.model.layers):
+            if not hasattr(layer, "mlp"):
+                continue
+
+            layer.mlp.save_dir = save_dir
+            layer.mlp.layer_idx = layer_idx
 
     # * Added
 
