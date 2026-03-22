@@ -1,7 +1,7 @@
 [project]
 name = "llm-steering"
 version = "0.1.0"
-requires-python = ">=3.12"
+requires-python = "==3.12.*"
 dependencies = [
     "accelerate==1.13.0",
     "aiohappyeyeballs==2.6.1",
@@ -70,3 +70,9 @@ packages = ["src"]
 # Loaded by vLLM in every process (including TP workers) via load_general_plugins().
 [project.entry-points."vllm.general_plugins"]
 llm_registration = "src.vllm_plugin:register"
+
+[tool.uv.sources]
+vllm = { path = "./vllm-0.18.0+cu126-cp312-cp312-linux_x86_64.whl" }
+
+[tool.uv]
+environments = ["sys_platform == 'linux'"]
