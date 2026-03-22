@@ -134,6 +134,17 @@ def collect_prompt_activations(
                 step=start_step + idx + 1,
             )
 
+    # final checkpoint save
+    if checkpoint_dir:
+        checkpoint.save(
+            raw_dir=checkpoint_dir,
+            pass_name=pass_name,
+            state={"A": A, "N": N},
+            dataset_name=dataset_name,
+            model_name=model_name,
+            step=start_step + idx + 1,
+        )
+
     return A, N
 
 
