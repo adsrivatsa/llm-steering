@@ -6,6 +6,7 @@ from transformers import AutoConfig, AutoTokenizer
 
 os.environ["LLM_REGISTRATION"] = "activation"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
 os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
 
@@ -38,6 +39,55 @@ MOE_EXPERT_CONFIG: dict[ModelName, tuple[int, int, int]] = {
 }
 
 
+def find_question_token_range(
+    tokenizer: AutoTokenizer,
+    content: str,
+    question: str,
+) -> tuple[int, int]:
+    """
+    Returns the (start, end) exclusive token indices of the question text within
+    the full chat-formatted + generation-prompt token sequence.
+
+    Uses char-level offset mapping so it correctly excludes the chat template
+    prefix (e.g. <|im_start|>user\\n) and suffix (e.g. <|im_end|>\\n<|im_start|>assistant\\n)
+    that vLLM appends around the user message content.
+    """
+    full_text: str = tokenizer.apply_chat_template(
+        [{"role": "user", "content": content}],
+        add_generation_prompt=True,
+        tokenize=False,
+    )
+
+    # rfind so we pick the last occurrence of the question in the full text,
+    # which is the actual question even when the document repeats it.
+    q_char_start = full_text.rfind(question)
+    if q_char_start == -1:
+        return 0, 0
+    q_char_end = q_char_start + len(question)
+
+    # Tokenize with offset mapping. special tokens from the chat template are
+    # already in the string (e.g. <|im_start|>), so add_special_tokens=False
+    # avoids double-adding a BOS and keeps positions consistent with what the
+    # model actually receives.
+    enc = tokenizer(full_text, return_offsets_mapping=True, add_special_tokens=False)
+    offsets: list[tuple[int, int]] = enc["offset_mapping"]
+    n = len(offsets)
+
+    start_tok: int | None = None
+    end_tok: int = n
+    for i, (cs, ce) in enumerate(offsets):
+        if cs == 0 and ce == 0:
+            # Special/padding token with no character span — skip.
+            continue
+        if start_tok is None and ce > q_char_start:
+            start_tok = i
+        if cs >= q_char_end:
+            end_tok = i
+            break
+
+    return (start_tok if start_tok is not None else 0), end_tok
+
+
 def resolve_parallelism(model_name: str) -> tuple[int, int]:
     """Return (tensor_parallel_size, pipeline_parallel_size) for the available GPUs.
 
@@ -67,7 +117,7 @@ def collect_prompt_activations(
     llm: LLM,
     dataset_name: str,
     pass_name: str,
-    prompts: list[tuple[str, int]],
+    prompts: list[tuple[str, int, int]],
     token_id_to_index: dict[int, int],
     *,
     checkpoint_dir: str | None = None,
@@ -109,7 +159,7 @@ def collect_prompt_activations(
         desc=f"Running MoE inference: {model_name} {dataset_name} {pass_name}",
         total=len(prompts) - start_step,
     ):
-        prompt, q_len = prompt
+        prompt, q_start, q_end = prompt
         message = [{"role": "user", "content": prompt}]
         _ = llm.chat(
             message,
@@ -121,7 +171,13 @@ def collect_prompt_activations(
         activation_logits = llm.collective_rpc(
             lambda self: self.model_runner.model.expert_activations()
         )[0]
-        activation_logits = activation_logits[:, :, -q_len:]  # [layers, experts, q_len]
+        # Slice exactly the question token positions within the full
+        # chat-formatted sequence, as computed by find_question_token_range.
+        activation_logits = activation_logits[
+            :, :, q_start:q_end
+        ]  # [layers, experts, q_len]
+
+        q_len = q_end - q_start
 
         # Top-k expert indices per (layer, token): [layers, k, q_len]
         top_k_indices = torch.topk(activation_logits, k, dim=1).indices
@@ -130,9 +186,13 @@ def collect_prompt_activations(
         expert_mask = torch.zeros(layers, experts, q_len, dtype=torch.float32)
         expert_mask.scatter_(1, top_k_indices, 1.0)
 
-        # Get token IDs for the question tokens (last q_len tokens of the full prompt)
-        prompt_token_ids = tokenizer(prompt, add_special_tokens=True)["input_ids"]
-        question_token_ids = prompt_token_ids[-q_len:]
+        # Get token IDs for the question tokens from the full chat-formatted
+        # sequence so they match exactly what the model processed.
+        full_text = tokenizer.apply_chat_template(
+            message, add_generation_prompt=True, tokenize=False
+        )
+        full_token_ids = tokenizer(full_text, add_special_tokens=False)["input_ids"]
+        question_token_ids = full_token_ids[q_start:q_end]
 
         # Filter to positions whose token IDs are in the index map
         valid_positions = [
@@ -183,21 +243,25 @@ def faithfulness_activations(
 
     dataset = SQuAD()
 
-    prompts_x1: list[tuple[str, int]] = []
-    prompts_x2: list[tuple[str, int]] = []
+    prompts_x1: list[tuple[str, int, int]] = []
+    prompts_x2: list[tuple[str, int, int]] = []
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     for example in tqdm(dataset, desc="Building prompts"):
-        document = f"Document: {example['context']}"
-        question = f"Question: {example['question']}"
+        document = example["context"]
+        question = example["question"]
 
-        x1 = f"{document} {question}"
-        x2 = f"{question}"
+        x1 = f"Document: {document} Question: {question}"
+        x2 = question
 
-        q_len = len(tokenizer(" " + question, add_special_tokens=True)["input_ids"])
-        prompts_x1.append((x1, q_len))
-        prompts_x2.append((x2, q_len))
+        # Find the exact token positions of the question within the
+        # chat-formatted sequence so we can slice activation_logits correctly.
+        q_start_x1, q_end_x1 = find_question_token_range(tokenizer, x1, question)
+        q_start_x2, q_end_x2 = find_question_token_range(tokenizer, x2, question)
+
+        prompts_x1.append((x1, q_start_x1, q_end_x1))
+        prompts_x2.append((x2, q_start_x2, q_end_x2))
 
     tp, pp = resolve_parallelism(model_name)
     print(f"Parallelism: tensor_parallel_size={tp}, pipeline_parallel_size={pp}")
@@ -241,12 +305,17 @@ def faithfulness_unique_token_ids(model_name: ModelName) -> set[int]:
 
     unique_token_ids: set[int] = set()
     for example in tqdm(dataset, desc="Collecting unique tokens"):
-        for prompt in [
-            f"Question: {example['question']}, Answer: ",
-            f" Question: {example['question']}, Answer: ",
-        ]:
-            encoded = tokenizer(prompt, add_special_tokens=True)["input_ids"]
-            unique_token_ids.update(encoded)
+        question = example["question"]
+        # Encode the question as it appears in the two prompt contexts:
+        #   x1: the question follows a document (preceded by a space)
+        #   x2: the question is standalone (no leading space)
+        # Using add_special_tokens=False so we only get the bare question
+        # tokens, not BOS/EOS that wouldn't appear in the middle of the
+        # chat-formatted sequence.
+        for q_variant in [question, f" {question}"]:
+            unique_token_ids.update(
+                tokenizer.encode(q_variant, add_special_tokens=False)
+            )
 
     return unique_token_ids
 
