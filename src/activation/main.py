@@ -190,8 +190,8 @@ def collect_prompt_activations(
         # Top-k expert indices per (layer, token): [layers, k, q_len]
         top_k_indices = torch.topk(activation_logits, k, dim=1).indices
 
-        # Binary mask: 1 where expert was among top-k, shape [layers, experts, q_len]
-        expert_mask = torch.zeros(layers, experts, q_len, dtype=torch.float32)
+        # Signed mask: 1 where expert was among top-k, else -1, shape [layers, experts, q_len]
+        expert_mask = torch.full((layers, experts, q_len), -1.0, dtype=torch.float32)
         expert_mask.scatter_(1, top_k_indices, 1.0)
 
         # Get token IDs for the question tokens from the full chat-formatted
