@@ -47,44 +47,48 @@ def find_question_token_range(
     Returns the (start, end) exclusive token indices of the question text within
     the full chat-formatted + generation-prompt token sequence.
 
-    Uses char-level offset mapping so it correctly excludes the chat template
-    prefix (e.g. <|im_start|>user\\n) and suffix (e.g. <|im_end|>\\n<|im_start|>assistant\\n)
-    that vLLM appends around the user message content.
+    This uses token-subsequence matching against the exact prompt token IDs that
+    the model sees, which is more robust than char-offset mapping for BPE
+    boundary effects (e.g. leading-space tokenization differences between x1/x2).
     """
-    full_text: str = tokenizer.apply_chat_template(
+    full_text = tokenizer.apply_chat_template(
         [{"role": "user", "content": content}],
         add_generation_prompt=True,
         tokenize=False,
     )
+    full_token_ids: list[int] = tokenizer(full_text, add_special_tokens=False)[
+        "input_ids"
+    ]
 
-    # rfind so we pick the last occurrence of the question in the full text,
-    # which is the actual question even when the document repeats it.
-    q_char_start = full_text.rfind(question)
-    if q_char_start == -1:
+    # Two variants are needed because in x1 the question follows "Question: "
+    # and often starts with a leading-space token, while x2 is standalone.
+    candidate_questions = [question, f" {question}"]
+    candidates: list[list[int]] = []
+    for q in candidate_questions:
+        ids = tokenizer(q, add_special_tokens=False)["input_ids"]
+        if ids and ids not in candidates:
+            candidates.append(ids)
+
+    if not candidates:
         return 0, 0
-    q_char_end = q_char_start + len(question)
 
-    # Tokenize with offset mapping. special tokens from the chat template are
-    # already in the string (e.g. <|im_start|>), so add_special_tokens=False
-    # avoids double-adding a BOS and keeps positions consistent with what the
-    # model actually receives.
-    enc = tokenizer(full_text, return_offsets_mapping=True, add_special_tokens=False)
-    offsets: list[tuple[int, int]] = enc["offset_mapping"]
-    n = len(offsets)
+    best_start: int | None = None
+    best_end: int | None = None
 
-    start_tok: int | None = None
-    end_tok: int = n
-    for i, (cs, ce) in enumerate(offsets):
-        if cs == 0 and ce == 0:
-            # Special/padding token with no character span — skip.
+    for target_ids in candidates:
+        t_len = len(target_ids)
+        if t_len == 0 or t_len > len(full_token_ids):
             continue
-        if start_tok is None and ce > q_char_start:
-            start_tok = i
-        if cs >= q_char_end:
-            end_tok = i
-            break
+        # Keep the last match, mirroring prior rfind behavior when question
+        # text appears earlier in context.
+        for i in range(len(full_token_ids) - t_len + 1):
+            if full_token_ids[i : i + t_len] == target_ids:
+                best_start = i
+                best_end = i + t_len
 
-    return (start_tok if start_tok is not None else 0), end_tok
+    if best_start is None or best_end is None:
+        return 0, 0
+    return best_start, best_end
 
 
 def resolve_parallelism(model_name: str) -> tuple[int, int]:
@@ -190,8 +194,8 @@ def collect_prompt_activations(
         # Top-k expert indices per (layer, token): [layers, k, q_len]
         top_k_indices = torch.topk(activation_logits, k, dim=1).indices
 
-        # Signed mask: 1 where expert was among top-k, else -1, shape [layers, experts, q_len]
-        expert_mask = torch.full((layers, experts, q_len), -1.0, dtype=torch.float32)
+        # Binary mask: 1 where expert was among top-k, else 0, shape [layers, experts, q_len]
+        expert_mask = torch.full((layers, experts, q_len), 0.0, dtype=torch.float32)
         expert_mask.scatter_(1, top_k_indices, 1.0)
 
         # Get token IDs for the question tokens from the full chat-formatted
@@ -257,16 +261,19 @@ def faithfulness_activations(
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     for example in tqdm(dataset, desc="Building prompts"):
-        document = example["context"]
-        question = example["question"]
+        document = f"Document {example['context']}"
+        question = f"Question {example['question']}"
 
-        x1 = f"Document: {document} Question: {question}"
+        x1 = f"{document} {question}"
         x2 = question
 
         # Find the exact token positions of the question within the
         # chat-formatted sequence so we can slice activation_logits correctly.
         q_start_x1, q_end_x1 = find_question_token_range(tokenizer, x1, question)
+        assert q_start_x1 != 0 and q_end_x1 != 0
+
         q_start_x2, q_end_x2 = find_question_token_range(tokenizer, x2, question)
+        assert q_start_x2 != 0 and q_end_x2 != 0
 
         prompts_x1.append((x1, q_start_x1, q_end_x1))
         prompts_x2.append((x2, q_start_x2, q_end_x2))
@@ -313,13 +320,7 @@ def faithfulness_unique_token_ids(model_name: ModelName) -> set[int]:
 
     unique_token_ids: set[int] = set()
     for example in tqdm(dataset, desc="Collecting unique tokens"):
-        question = example["question"]
-        # Encode the question as it appears in the two prompt contexts:
-        #   x1: the question follows a document (preceded by a space)
-        #   x2: the question is standalone (no leading space)
-        # Using add_special_tokens=False so we only get the bare question
-        # tokens, not BOS/EOS that wouldn't appear in the middle of the
-        # chat-formatted sequence.
+        question = f"Question: {example['question']}"
         for q_variant in [question, f" {question}"]:
             unique_token_ids.update(
                 tokenizer.encode(q_variant, add_special_tokens=False)

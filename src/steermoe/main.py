@@ -2,9 +2,10 @@ import argparse
 import os
 
 from src import checkpoint
+from src.steermoe.inference import faitheval_counterfactual, faitheval_unanswerable
 
+os.environ["LLM_REGISTRATION"] = "steermoe"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
 os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
 
@@ -12,9 +13,9 @@ os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
 import torch
 from typing import Literal, Tuple
 
-from vllm import LLM, SamplingParams
+from vllm import LLM
 
-from src.steermoe.vllm_plugin import register as register_vllm_models
+from src.vllm_plugin import register as register_vllm_models
 
 
 ModelName = Literal[
@@ -26,13 +27,13 @@ ModelName = Literal[
     "microsoft/Phi-3.5-MoE-instruct",
 ]
 
-MOE_EXPERT_CONFIG: dict[ModelName, Tuple[int, int]] = {
-    "openai/gpt-oss-20b": (4, 32),
-    "openai/gpt-oss-120b": (4, 128),
-    "Qwen/Qwen3-30B-A3B": (8, 128),
-    "mistralai/Mixtral-8x7B-Instruct-v0.1": (2, 8),
-    "allenai/OLMoE-1B-7B-0125-Instruct": (8, 64),
-    "microsoft/Phi-3.5-MoE-instruct": (2, 16),
+MOE_EXPERT_CONFIG: dict[ModelName, tuple[int, int, int]] = {
+    "openai/gpt-oss-20b": (24, 4, 32),
+    "openai/gpt-oss-120b": (36, 4, 128),
+    "Qwen/Qwen3-30B-A3B": (48, 8, 128),
+    "mistralai/Mixtral-8x7B-Instruct-v0.1": (32, 2, 8),
+    "allenai/OLMoE-1B-7B-0125-Instruct": (16, 8, 64),
+    "microsoft/Phi-3.5-MoE-instruct": (32, 2, 16),
 }
 
 EXPERT_ACTIVATION_DEACTIVATION: dict[str, Tuple[int, int]] = {
@@ -81,7 +82,7 @@ def risk_diff_to_manual_weights(
 
 def steer(llm: LLM, delta: torch.Tensor, eps: float = 0.01) -> None:
     mc = llm.model_config
-    num_experts_per_tok, _ = MOE_EXPERT_CONFIG[mc.model]
+    _, num_experts_per_tok, _ = MOE_EXPERT_CONFIG[mc.model]
     n_activated, n_deactivated = EXPERT_ACTIVATION_DEACTIVATION[mc.model]
     manual_weights: torch.Tensor = risk_diff_to_manual_weights(
         delta, num_experts_per_tok, n_activated, n_deactivated
@@ -102,17 +103,11 @@ def calculate_delta(model_name: ModelName, task: str, activations_dir: str):
     x1_data = checkpoint.load(activations_dir, "x1", train_dataset, model_name)
     x2_data = checkpoint.load(activations_dir, "x2", train_dataset, model_name)
 
-    x1_expert_activation_counts, x1_token_counts = (
-        x1_data["expert_counts_by_token"],
-        x1_data["token_counts"],
-    )
-    x2_expert_activation_counts, x2_token_counts = (
-        x2_data["expert_counts_by_token"],
-        x2_data["token_counts"],
-    )
+    A1, N1 = (x1_data["A"], x1_data["N"])
+    A2, N2 = (x2_data["A"], x2_data["N"])
 
-    p1 = x1_expert_activation_counts.sum(dim=-1) / x1_token_counts.sum()
-    p2 = x2_expert_activation_counts.sum(dim=-1) / x2_token_counts.sum()
+    p1 = A1.sum(dim=-1) / N1.sum()
+    p2 = A2.sum(dim=-1) / N2.sum()
 
     delta = torch.nan_to_num(p1) - torch.nan_to_num(p2)
 
@@ -130,7 +125,6 @@ def main(
 
     llm = LLM(
         model=model_name,
-        # max_seq_len_to_capture=4096,
         max_model_len=4096,
         tensor_parallel_size=torch.cuda.device_count(),
         gpu_memory_utilization=0.95,
@@ -146,44 +140,23 @@ def main(
         )
         steer(llm=llm, delta=delta, eps=0.01)
 
-    batch_messages = [
-        [
-            {
-                "role": "user",
-                "content": "Document: iPod was developed by Google\n Question: Who is the developer of iPod? \n Final Answer Only:",
-            }
-        ],
-        [
-            {
-                "role": "user",
-                "content": "Document: The chief executive officer of Google is Lakshmi Mittal\n Question: Who is the chief executive officer of Google? \n Final Answer Only:",
-            }
-        ],
-        [
-            {
-                "role": "user",
-                "content": "Document: Anderson Cooper is employed by National Review\n Question: Who is the employer of Anderson Cooper? \n Final Answer Only:",
-            }
-        ],
-    ]
+    if task == "faithfulness":
+        if dataset == "faitheval_counterfactual":
+            score = faitheval_counterfactual.infer(
+                llm=llm,
+                checkpoint_dir=inference_dir,
+                pass_name="steered" if use_steering else "unsteered",
+                batch_size=4,
+            )
+        elif dataset == "faitheval_unanswerable":
+            score = faitheval_unanswerable.infer(
+                llm=llm,
+                checkpoint_dir=inference_dir,
+                pass_name="steered" if use_steering else "unsteered",
+                batch_size=4,
+            )
 
-    sampling_params = SamplingParams(
-        temperature=0.0,
-        top_p=1,
-        top_k=1,
-        min_p=0,
-        max_tokens=512,
-        seed=0,
-    )
-    outputs = llm.chat(
-        batch_messages,
-        sampling_params,
-        use_tqdm=True,
-        chat_template_kwargs={"enable_thinking": False, "reasoning_effort": "low"},
-    )
-    generations = [output.outputs[0].text for output in outputs]
-    for generation in generations:
-        print(generation)
+    print(score)
 
 
 if __name__ == "__main__":
@@ -209,7 +182,7 @@ if __name__ == "__main__":
         "--model",
         dest="model_name",
         type=str,
-        default="openai/gpt-oss-20b",
+        default="allenai/OLMoE-1B-7B-0125-Instruct",
     )
     parser.add_argument("--activations-dir", type=str, default="activations")
     parser.add_argument("--inference-dir", type=str, default="inference")
