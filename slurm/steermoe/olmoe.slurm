@@ -26,6 +26,7 @@ cd "$SLURM_SUBMIT_DIR"
 # threading fix
 export OPENBLAS_NUM_THREADS="$SLURM_CPUS_PER_TASK"
 
+export HF_HOME=/scratch1/${SLURM_JOB_USER}/.cache/huggingface
 export PY_BIN="$(pwd)/.venv/bin/python"
 
 IA=$((SLURM_ARRAY_TASK_ID / N_D))
