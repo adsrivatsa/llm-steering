@@ -21,7 +21,7 @@ cd "$SLURM_SUBMIT_DIR"
 # threading fix
 export OPENBLAS_NUM_THREADS="$SLURM_CPUS_PER_TASK"
 
-export PY_BIN="/scr2/${SLURM_JOB_USER}/llm-steering/.venv/bin/python"
+export PY_BIN="/scratch1/${SLURM_JOB_USER}/llm-steering/.venv/bin/python"
 
 echo "Working directory: $(pwd)"
 echo "Job started on $(hostname) at $(date)"
