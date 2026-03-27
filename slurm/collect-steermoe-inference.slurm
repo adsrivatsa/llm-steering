@@ -8,6 +8,7 @@
 #SBATCH --cpus-per-task=5
 #SBATCH --gpus-per-task=1
 #SBATCH --partition=gpu
+#SBATCH --array=0-1
 #SBATCH --constraint="a100|l40s|a40"
 #SBATCH --mem=24G
 #SBATCH --time=24:00:00
