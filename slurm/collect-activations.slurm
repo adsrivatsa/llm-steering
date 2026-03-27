@@ -7,7 +7,9 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=5
 #SBATCH --gpus-per-task=1
-#SBATCH --mem=32G
+#SBATCH --partition=gpu
+#SBATCH --constraint="a100|l40s|a40"
+#SBATCH --mem=24G
 #SBATCH --time=24:00:00
 
 LLM_NAME="allenai/OLMoE-1B-7B-0125-Instruct"

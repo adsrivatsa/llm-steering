@@ -1,14 +1,15 @@
 #!/bin/bash
 #SBATCH --account=robinjia_1822
-#SBATCH --job-name=collect-steermoe-activations
+#SBATCH --job-name=collect-steermoe-inference
 #SBATCH --output=logs/%x-%A.out
 #SBATCH --error=logs/%x-%A.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=5
 #SBATCH --gpus-per-task=1
-#SBATCH --array=0-1
-#SBATCH --mem=32G
+#SBATCH --partition=gpu
+#SBATCH --constraint="a100|l40s|a40"
+#SBATCH --mem=24G
 #SBATCH --time=24:00:00
 
 LLM_NAME="allenai/OLMoE-1B-7B-0125-Instruct"
