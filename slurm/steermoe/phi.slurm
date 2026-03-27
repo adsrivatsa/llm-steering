@@ -6,19 +6,19 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=5
-#SBATCH --gpus-per-task=1
+#SBATCH --gpus-per-task=3
 #SBATCH --partition=gpu
 #SBATCH --array=0-35
 #SBATCH --constraint="a100|l40s|a40"
 #SBATCH --mem=24G
 #SBATCH --time=08:00:00
 
-ACTIVATED=(0 2 4 8 16 32)
-DEACTIVATED=(0 32 64 128 256 512)
+ACTIVATED=(0 1 2 4 8 16)
+DEACTIVATED=(0 4 32 64 128 256)
 N_A=${#ACTIVATED[@]}
 N_D=${#DEACTIVATED[@]}
 
-LLM_NAME="allenai/OLMoE-1B-7B-0125-Instruct"
+LLM_NAME="microsoft/Phi-3.5-MoE-instruct"
 TASK="faithfulness"
 
 cd "$SLURM_SUBMIT_DIR"

@@ -1,24 +1,24 @@
 #!/bin/bash
 #SBATCH --account=robinjia_1822
-#SBATCH --job-name=collect-olmoe-steermoe-inference
+#SBATCH --job-name=collect-gpt-steermoe-inference
 #SBATCH --output=logs/%x-%A_%a.out
 #SBATCH --error=logs/%x-%A_%a.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=5
-#SBATCH --gpus-per-task=1
+#SBATCH --gpus-per-task=2
 #SBATCH --partition=gpu
 #SBATCH --array=0-35
 #SBATCH --constraint="a100|l40s|a40"
 #SBATCH --mem=24G
 #SBATCH --time=08:00:00
 
-ACTIVATED=(0 2 4 8 16 32)
-DEACTIVATED=(0 32 64 128 256 512)
+ACTIVATED=(0 1 3 6 12 24)
+DEACTIVATED=(0 24 48 96 192 384)
 N_A=${#ACTIVATED[@]}
 N_D=${#DEACTIVATED[@]}
 
-LLM_NAME="allenai/OLMoE-1B-7B-0125-Instruct"
+LLM_NAME="openai/gpt-oss-20b"
 TASK="faithfulness"
 
 cd "$SLURM_SUBMIT_DIR"
