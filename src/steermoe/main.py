@@ -2,7 +2,14 @@ import argparse
 import os
 
 from src import checkpoint
-from src.steermoe.inference import faitheval_counterfactual, faitheval_unanswerable
+from src.steermoe.inference import (
+    cf_trivia_qa,
+    faitheval_counterfactual,
+    faitheval_unanswerable,
+    faitheval_inconsistent,
+    mctest,
+    mquake,
+)
 
 os.environ["LLM_REGISTRATION"] = "steermoe"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -141,22 +148,53 @@ def main(
         steer(llm=llm, delta=delta, eps=0.01)
 
     if task == "faithfulness":
-        if dataset == "faitheval_counterfactual":
-            score = faitheval_counterfactual.infer(
-                llm=llm,
-                checkpoint_dir=inference_dir,
-                pass_name="steered" if use_steering else "unsteered",
-                batch_size=4,
-            )
-        elif dataset == "faitheval_unanswerable":
-            score = faitheval_unanswerable.infer(
-                llm=llm,
-                checkpoint_dir=inference_dir,
-                pass_name="steered" if use_steering else "unsteered",
-                batch_size=4,
-            )
+        score = faitheval_counterfactual.infer(
+            llm=llm,
+            checkpoint_dir=inference_dir,
+            pass_name="steered" if use_steering else "unsteered",
+            batch_size=4,
+        )
+        print(score)
 
-    print(score)
+        score = faitheval_unanswerable.infer(
+            llm=llm,
+            checkpoint_dir=inference_dir,
+            pass_name="steered" if use_steering else "unsteered",
+            batch_size=4,
+        )
+        print(score)
+
+        score = faitheval_inconsistent.infer(
+            llm=llm,
+            checkpoint_dir=inference_dir,
+            pass_name="steered" if use_steering else "unsteered",
+            batch_size=4,
+        )
+        print(score)
+
+        score = cf_trivia_qa.infer(
+            llm=llm,
+            checkpoint_dir=inference_dir,
+            pass_name="steered" if use_steering else "unsteered",
+            batch_size=4,
+        )
+        print(score)
+
+        score = mquake.infer(
+            llm=llm,
+            checkpoint_dir=inference_dir,
+            pass_name="steered" if use_steering else "unsteered",
+            batch_size=4,
+        )
+        print(score)
+
+        score = mctest.infer(
+            llm=llm,
+            checkpoint_dir=inference_dir,
+            pass_name="steered" if use_steering else "unsteered",
+            batch_size=4,
+        )
+        print(score)
 
 
 if __name__ == "__main__":
@@ -167,15 +205,6 @@ if __name__ == "__main__":
         type=str,
         choices=["faithfulness"],
         default="faithfulness",
-    )
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        choices=[
-            "faitheval_counterfactual",
-            "faitheval_inconsistent",
-            "faitheval_unanswerable",
-        ],
     )
     parser.add_argument(
         "--llm",
@@ -195,7 +224,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     task: str = args.task
     model_name: ModelName = args.model_name
-    dataset: str = args.dataset
     activations_dir: str = args.activations_dir
     inference_dir: str = args.inference_dir
     no_steering: bool = args.no_steering

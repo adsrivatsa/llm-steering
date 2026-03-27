@@ -1,3 +1,7 @@
 __pycache__
 .venv
 activations/raw
+*.png
+uv.lock
+activations/
+inference/
