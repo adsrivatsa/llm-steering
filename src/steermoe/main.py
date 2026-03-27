@@ -87,10 +87,15 @@ def risk_diff_to_manual_weights(
     return moe_manual_weights
 
 
-def steer(llm: LLM, delta: torch.Tensor, eps: float = 0.01) -> None:
+def steer(
+    llm: LLM,
+    delta: torch.Tensor,
+    n_activated: int,
+    n_deactivated: int,
+    eps: float = 0.01,
+) -> None:
     mc = llm.model_config
     _, num_experts_per_tok, _ = MOE_EXPERT_CONFIG[mc.model]
-    n_activated, n_deactivated = EXPERT_ACTIVATION_DEACTIVATION[mc.model]
     manual_weights: torch.Tensor = risk_diff_to_manual_weights(
         delta, num_experts_per_tok, n_activated, n_deactivated
     )
@@ -126,7 +131,8 @@ def main(
     task: str,
     activations_dir: str,
     inference_dir: str,
-    use_steering: bool,
+    n_activated: int,
+    n_deactivated: int,
 ):
     register_vllm_models()
 
@@ -141,17 +147,24 @@ def main(
         trust_remote_code=True,
     )
 
-    if use_steering:
-        delta = calculate_delta(
-            model_name=model_name, task=task, activations_dir=activations_dir
-        )
-        steer(llm=llm, delta=delta, eps=0.01)
+    delta = calculate_delta(
+        model_name=model_name, task=task, activations_dir=activations_dir
+    )
+    steer(
+        llm=llm,
+        delta=delta,
+        n_activated=n_activated,
+        n_deactivated=n_deactivated,
+        eps=0.01,
+    )
+
+    pass_name = f"a{n_activated}_d{n_deactivated}"
 
     if task == "faithfulness":
         score = faitheval_counterfactual.infer(
             llm=llm,
             checkpoint_dir=inference_dir,
-            pass_name="steered" if use_steering else "unsteered",
+            pass_name=pass_name,
             batch_size=4,
         )
         print(score)
@@ -159,7 +172,7 @@ def main(
         score = faitheval_unanswerable.infer(
             llm=llm,
             checkpoint_dir=inference_dir,
-            pass_name="steered" if use_steering else "unsteered",
+            pass_name=pass_name,
             batch_size=4,
         )
         print(score)
@@ -167,7 +180,7 @@ def main(
         score = faitheval_inconsistent.infer(
             llm=llm,
             checkpoint_dir=inference_dir,
-            pass_name="steered" if use_steering else "unsteered",
+            pass_name=pass_name,
             batch_size=4,
         )
         print(score)
@@ -175,7 +188,7 @@ def main(
         score = cf_trivia_qa.infer(
             llm=llm,
             checkpoint_dir=inference_dir,
-            pass_name="steered" if use_steering else "unsteered",
+            pass_name=pass_name,
             batch_size=4,
         )
         print(score)
@@ -183,7 +196,7 @@ def main(
         score = mquake.infer(
             llm=llm,
             checkpoint_dir=inference_dir,
-            pass_name="steered" if use_steering else "unsteered",
+            pass_name=pass_name,
             batch_size=4,
         )
         print(score)
@@ -191,7 +204,7 @@ def main(
         score = mctest.infer(
             llm=llm,
             checkpoint_dir=inference_dir,
-            pass_name="steered" if use_steering else "unsteered",
+            pass_name=pass_name,
             batch_size=4,
         )
         print(score)
@@ -215,23 +228,22 @@ if __name__ == "__main__":
     )
     parser.add_argument("--activations-dir", type=str, default="activations")
     parser.add_argument("--inference-dir", type=str, default="inference")
-    parser.add_argument(
-        "--no-steering",
-        action="store_true",
-        default=False,
-    )
+    parser.add_argument("--experts-activated", type=int)
+    parser.add_argument("--experts-deactivated", type=int)
 
     args = parser.parse_args()
     task: str = args.task
     model_name: ModelName = args.model_name
     activations_dir: str = args.activations_dir
     inference_dir: str = args.inference_dir
-    no_steering: bool = args.no_steering
+    n_activated: int = args.experts_activated
+    n_deactivated: int = args.experts_deactivated
 
     main(
         model_name=model_name,
         task=task,
         activations_dir=activations_dir,
         inference_dir=inference_dir,
-        use_steering=not no_steering,
+        n_activated=n_activated,
+        n_deactivated=n_deactivated,
     )

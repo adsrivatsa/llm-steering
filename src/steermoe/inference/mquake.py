@@ -1,14 +1,12 @@
 import json
 import os
-import re
-from collections import defaultdict
 from typing import Any
 
 from torch.utils.data import DataLoader, Dataset, Subset
 from tqdm.auto import tqdm
 from vllm import LLM, SamplingParams
 
-from src import checkpoint
+from src.steermoe.inference import util
 from src.steermoe.inference.dataset import MQuAKE
 
 
@@ -40,13 +38,6 @@ def build_prompt(*, facts: list[str], question: str) -> str:
     )
 
 
-def output_jsonl_path(
-    checkpoint_dir: str, dataset_name: str, model_name: str, pass_name: str
-) -> str:
-    model_safe = checkpoint.safe_model_name(model_name)
-    return os.path.join(checkpoint_dir, dataset_name, f"{model_safe}_{pass_name}.jsonl")
-
-
 def score(jsonl_path: str) -> dict[str, float | int]:
     total = correct = 0
     with open(jsonl_path, "r", encoding="utf-8") as f:
@@ -64,17 +55,6 @@ def score(jsonl_path: str) -> dict[str, float | int]:
                 correct += 1
     accuracy = correct / total if total > 0 else 0.0
     return {"total": total, "correct": correct, "accuracy": accuracy}
-
-
-def nonempty_lines(path: str) -> int:
-    if not os.path.isfile(path):
-        return 0
-    n = 0
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                n += 1
-    return n
 
 
 class FlattenedMQuAKEQuestions(Dataset):
@@ -114,13 +94,13 @@ def infer(
     base_ds = MQuAKE()
     ds = FlattenedMQuAKEQuestions(base_ds)
 
-    outputs_jsonl_path = output_jsonl_path(
+    outputs_jsonl_path = util.output_jsonl_path(
         checkpoint_dir=checkpoint_dir,
         dataset_name=dataset_name,
         model_name=model_name,
         pass_name=pass_name,
     )
-    start = nonempty_lines(outputs_jsonl_path)
+    start = util.nonempty_lines(outputs_jsonl_path)
     if start > 0:
         remaining = max(0, len(ds) - start)
         print(

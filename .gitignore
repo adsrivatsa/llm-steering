@@ -4,4 +4,4 @@ activations/raw
 *.png
 uv.lock
 activations/
-inference/
+inference/*.jsonl

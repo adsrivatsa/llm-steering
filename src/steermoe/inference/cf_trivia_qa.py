@@ -1,13 +1,12 @@
 import json
 import os
-import re
-from typing import Any, List
+from typing import Any
 
 from tqdm.auto import tqdm
 from torch.utils.data import DataLoader, Subset
 from vllm import LLM, SamplingParams
 
-from src import checkpoint
+from src.steermoe.inference import util
 from src.steermoe.inference.dataset import CFTriviaQA
 
 
@@ -21,13 +20,6 @@ def build_prompt(item: dict[str, Any]) -> str:
         "You are an expert in retrieval-based question answering. "
         "Please respond with the exact answer, using only the information provided in the context. "
     )
-
-
-def output_jsonl_path(
-    checkpoint_dir: str, dataset_name: str, model_name: str, pass_name: str
-) -> str:
-    model_safe = checkpoint.safe_model_name(model_name)
-    return os.path.join(checkpoint_dir, dataset_name, f"{model_safe}_{pass_name}.jsonl")
 
 
 def score(jsonl_path: str) -> dict[str, float | int]:
@@ -45,17 +37,6 @@ def score(jsonl_path: str) -> dict[str, float | int]:
     return {"total": total, "correct": correct, "accuracy": accuracy}
 
 
-def nonempty_lines(path: str) -> int:
-    if not os.path.isfile(path):
-        return 0
-    n = 0
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                n += 1
-    return n
-
-
 def infer(
     *,
     llm: LLM,
@@ -67,13 +48,13 @@ def infer(
     dataset_name = "cf_trivia_qa"
 
     ds = CFTriviaQA()
-    outputs_jsonl_path = output_jsonl_path(
+    outputs_jsonl_path = util.output_jsonl_path(
         checkpoint_dir=checkpoint_dir,
         dataset_name=dataset_name,
         model_name=model_name,
         pass_name=pass_name,
     )
-    start = nonempty_lines(outputs_jsonl_path)
+    start = util.nonempty_lines(outputs_jsonl_path)
     if start > 0:
         remaining = max(0, len(ds) - start)
         print(

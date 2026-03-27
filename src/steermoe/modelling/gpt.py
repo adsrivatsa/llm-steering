@@ -218,11 +218,11 @@ class MLPBlock(torch.nn.Module):
 
         s_max = router_logits.max(dim=-1).values.unsqueeze(-1)
         s_min = router_logits.min(dim=-1).values.unsqueeze(-1)
-        pos_mask = (moe_manual_weights > 0).unsqueeze(0)
-        neg_mask = (moe_manual_weights < 0).unsqueeze(0)
+        pos_mask = moe_manual_weights > 0
+        neg_mask = moe_manual_weights < 0
 
-        router_logits[:, pos_mask.squeeze(0)] = s_max + eps
-        router_logits[:, neg_mask.squeeze(0)] = s_min - eps
+        router_logits[:, pos_mask] = s_max + eps
+        router_logits[:, neg_mask] = s_min - eps
 
         g = router_logits
 

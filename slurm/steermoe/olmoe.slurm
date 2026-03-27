@@ -1,0 +1,45 @@
+#!/bin/bash
+#SBATCH --account=robinjia_1822
+#SBATCH --job-name=collect-olmoe-steermoe-inference
+#SBATCH --output=logs/%x-%A_%a.out
+#SBATCH --error=logs/%x-%A_%a.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=5
+#SBATCH --gpus-per-task=1
+#SBATCH --partition=gpu
+#SBATCH --array=0-35
+#SBATCH --constraint="a100|l40s|a40"
+#SBATCH --mem=24G
+#SBATCH --time=24:00:00
+
+ACTIVATED=(0 2 5 10 20 50)
+DEACTIVATED=(0 25 50 75 100 150)
+N_A=${#ACTIVATED[@]}
+N_D=${#DEACTIVATED[@]}
+
+LLM_NAME="allenai/OLMoE-1B-7B-0125-Instruct"
+TASK="faithfulness"
+
+cd "$SLURM_SUBMIT_DIR"
+
+# threading fix
+export OPENBLAS_NUM_THREADS="$SLURM_CPUS_PER_TASK"
+
+export PY_BIN="/scratch1/${SLURM_JOB_USER}/llm-steering/.venv/bin/python"
+
+IA=$((SLURM_ARRAY_TASK_ID / N_D))
+ID=$((SLURM_ARRAY_TASK_ID % N_D))
+N_ACTIVATED="${ACTIVATED[$IA]}"
+N_DEACTIVATED="${DEACTIVATED[$ID]}"
+
+echo "Working directory: $(pwd)"
+echo "Job started on $(hostname) at $(date)"
+echo "Running inference with LLM: $LLM_NAME on task: $TASK"
+echo "Array task id: $SLURM_ARRAY_TASK_ID -> experts_activated=$N_ACTIVATED experts_deactivated=$N_DEACTIVATED (pass_name=a${N_ACTIVATED}_d${N_DEACTIVATED})"
+
+$PY_BIN -m src.steermoe.main \
+  --llm "$LLM_NAME" \
+  --task "$TASK" \
+  --experts-activated "$N_ACTIVATED" \
+  --experts-deactivated "$N_DEACTIVATED"
