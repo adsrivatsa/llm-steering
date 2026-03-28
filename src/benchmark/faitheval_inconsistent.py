@@ -3,12 +3,12 @@ import os
 import re
 from typing import Any
 
+from tqdm.auto import tqdm
 from torch.utils.data import DataLoader, Subset
-from tqdm.std import tqdm
 from vllm import LLM, SamplingParams
 
-from src.steermoe.inference import util
-from src.steermoe.inference.dataset import FaithEvalUnanswerable
+from src.benchmark import util
+from src.benchmark.dataset import FaithEvalInconsistent
 
 
 def build_prompt(item: dict[str, Any]) -> str:
@@ -20,19 +20,19 @@ def build_prompt(item: dict[str, Any]) -> str:
         f"Question: {question}\n\n"
         "You are an expert in retrieval-based question answering. "
         "Please respond with the exact answer, using only the information provided in the context. "
-        'If there is no information available from the context, the answer should be "unknown".'
+        'If there is conflicting information or multiple answers in the context, the answer should be "conflict".'
     )
 
 
 def parse_output(text: str) -> str:
     text = text.strip()
     match = re.search(
-        r"\b(unanswerable|unknown|no answer|no information|not|unclear)\b\.?",
+        r"(?:conflict|conflicting|disagreement|inconsistent|contradictory|contradiction|inconsistency|two answers|2 answers|multiple answers)\.?",
         text,
         re.IGNORECASE,
     )
     if match:
-        return "unknown"
+        return "conflict"
     return text
 
 
@@ -45,7 +45,7 @@ def score(jsonl_path: str) -> dict[str, float | int]:
                 continue
             record = json.loads(line)
             total += 1
-            if record["model_output"] == "unknown":
+            if record["model_output"] == "conflict":
                 correct += 1
     accuracy = correct / total if total > 0 else 0.0
     return {"total": total, "correct": correct, "accuracy": accuracy}
@@ -59,9 +59,9 @@ def infer(
     batch_size: int = 4,
 ) -> str:
     model_name = llm.model_config.model
-    dataset_name = "faitheval_unanswerable"
+    dataset_name = "faitheval_inconsistent"
 
-    ds = FaithEvalUnanswerable()
+    ds = FaithEvalInconsistent()
     outputs_jsonl_path = util.output_jsonl_path(
         checkpoint_dir=checkpoint_dir,
         dataset_name=dataset_name,
@@ -93,10 +93,29 @@ def infer(
     sampling_params = SamplingParams(
         temperature=0.0, top_p=1, top_k=1, min_p=0, max_tokens=16, seed=0
     )
+    max_context_tokens = 4096
+    tokenizer = llm.get_tokenizer()
+    skipped_for_length = 0
+
+    def count_input_tokens(messages: list[dict[str, str]]) -> int:
+        try:
+            tokenized = tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+            )
+            if isinstance(tokenized, list):
+                return len(tokenized)
+            if hasattr(tokenized, "shape"):
+                return int(tokenized.shape[-1])
+            return len(tokenized)
+        except Exception:
+            prompt_text = "\n".join(m["content"] for m in messages)
+            return len(tokenizer.encode(prompt_text, add_special_tokens=True))
 
     with open(outputs_jsonl_path, file_mode, encoding="utf-8") as out_f:
-        for batch_examples in tqdm(loader, desc="FaithEval Unanswerable inference"):
-            batch_prompts = [
+        for batch_examples in tqdm(loader, desc="FaithEval Inconsistent inference"):
+            raw_batch_prompts = [
                 [
                     {
                         "role": "user",
@@ -105,6 +124,17 @@ def infer(
                 ]
                 for item in batch_examples
             ]
+            filtered_examples: list[dict[str, Any]] = []
+            batch_prompts: list[list[dict[str, str]]] = []
+            for item, prompt in zip(batch_examples, raw_batch_prompts):
+                input_tokens = count_input_tokens(prompt)
+                if input_tokens + sampling_params.max_tokens > max_context_tokens:
+                    skipped_for_length += 1
+                    continue
+                filtered_examples.append(item)
+                batch_prompts.append(prompt)
+            if not batch_prompts:
+                continue
 
             batch_outputs = llm.chat(
                 batch_prompts,
@@ -117,7 +147,7 @@ def infer(
             )
 
             for item, prompt, output in zip(
-                batch_examples, batch_prompts, batch_outputs
+                filtered_examples, batch_prompts, batch_outputs
             ):
                 output_text = output.outputs[0].text
                 record = {
@@ -130,5 +160,10 @@ def infer(
                     "model_output_raw": output_text,
                 }
                 out_f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    if skipped_for_length > 0:
+        print(
+            f"Skipped {skipped_for_length} examples where input_tokens + max_tokens exceeded {max_context_tokens}."
+        )
 
     return score(jsonl_path=outputs_jsonl_path)

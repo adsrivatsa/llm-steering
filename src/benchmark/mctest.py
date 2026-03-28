@@ -7,8 +7,8 @@ from torch.utils.data import DataLoader, Subset
 from tqdm.auto import tqdm
 from vllm import LLM, SamplingParams
 
-from src.steermoe.inference import util
-from src.steermoe.inference.dataset import MCTest
+from src.benchmark import util
+from src.benchmark.dataset import MCTest
 
 
 def build_prompt(item: dict[str, Any]) -> str:

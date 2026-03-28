@@ -7,8 +7,8 @@ from tqdm.auto import tqdm
 from torch.utils.data import DataLoader, Subset
 from vllm import LLM, SamplingParams
 
-from src.steermoe.inference import util
-from src.steermoe.inference.dataset import FaithEvalCounterfactual
+from src.benchmark import util
+from src.benchmark.dataset import FaithEvalCounterfactual
 
 
 _LETTER_LABELS = ["A", "B", "C", "D", "E"]

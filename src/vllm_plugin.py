@@ -6,6 +6,8 @@ def register():
         register_activation_models()
     elif mode == "steermoe":
         register_steermoe_models()
+    elif mode == "toksteermoe":
+        register_toksteermoe_models()
 
 
 def register_activation_models():
@@ -53,4 +55,28 @@ def register_steermoe_models():
 
     ModelRegistry.register_model(
         "PhiMoEForCausalLM", "src.steermoe.modelling.phi:PhiMoEForCausalLM"
+    )
+
+
+def register_toksteermoe_models():
+    from vllm.model_executor.models import ModelRegistry
+
+    ModelRegistry.register_model(
+        "GptOssForCausalLM", "src.toksteermoe.modelling.gpt:GptOssForCausalLM"
+    )
+
+    ModelRegistry.register_model(
+        "OlmoeForCausalLM", "src.toksteermoe.modelling.olmoe:OlmoeForCausalLM"
+    )
+
+    ModelRegistry.register_model(
+        "Qwen3MoeForCausalLM", "src.toksteermoe.modelling.qwen:Qwen3MoeForCausalLM"
+    )
+
+    ModelRegistry.register_model(
+        "MixtralForCausalLM", "src.toksteermoe.modelling.mixtral:MixtralForCausalLM"
+    )
+
+    ModelRegistry.register_model(
+        "PhiMoEForCausalLM", "src.toksteermoe.modelling.phi:PhiMoEForCausalLM"
     )

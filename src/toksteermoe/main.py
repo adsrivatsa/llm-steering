@@ -1,27 +1,31 @@
-import argparse
 import os
 
-from src import checkpoint
-from src.benchmark import (
-    cf_trivia_qa,
-    faitheval_counterfactual,
-    faitheval_unanswerable,
-    faitheval_inconsistent,
-    mctest,
-    mquake,
-)
+from transformers import AutoTokenizer
 
-os.environ["LLM_REGISTRATION"] = "steermoe"
+from src import checkpoint
+from src.activation.dataset import SQuAD
+
+
+os.environ["LLM_REGISTRATION"] = "toksteermoe"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
 
+import argparse
+from typing import Literal
 
 import torch
-from typing import Literal, Tuple
-
+from tqdm.std import tqdm
 from vllm import LLM
 
+from src.benchmark import (
+    cf_trivia_qa,
+    faitheval_counterfactual,
+    faitheval_inconsistent,
+    faitheval_unanswerable,
+    mctest,
+    mquake,
+)
 from src.vllm_plugin import register as register_vllm_models
 
 
@@ -43,15 +47,6 @@ MOE_EXPERT_CONFIG: dict[ModelName, tuple[int, int, int]] = {
     "microsoft/Phi-3.5-MoE-instruct": (32, 2, 16),
 }
 
-EXPERT_ACTIVATION_DEACTIVATION: dict[str, Tuple[int, int]] = {
-    "openai/gpt-oss-120b": (5, 100),
-    "openai/gpt-oss-20b": (10, 50),
-    "mistralai/Mixtral-8x7B-Instruct-v0.1": (10, 100),
-    "allenai/OLMoE-1B-7B-0125-Instruct": (0, 50),
-    "microsoft/Phi-3.5-MoE-instruct": (10, 75),
-    "Qwen/Qwen3-30B-A3B": (0, 500),
-}
-
 
 def calculate_delta(model_name: ModelName, task: str, activations_dir: str):
     if task == "faithfulness":
@@ -67,8 +62,11 @@ def calculate_delta(model_name: ModelName, task: str, activations_dir: str):
     p2 = A2.sum(dim=-1) / N2.sum()
 
     delta = torch.nan_to_num(p1) - torch.nan_to_num(p2)
+    token_wise_delta = A1 - A2
 
-    return delta
+    assert (N1 - N2).sum() == 0
+
+    return delta, token_wise_delta, N1
 
 
 def risk_diff_to_manual_weights(
@@ -107,23 +105,76 @@ def risk_diff_to_manual_weights(
 
 def steer(
     llm: LLM,
-    delta: torch.Tensor,
+    token_wise_delta: torch.Tensor,
+    token_freq: torch.Tensor,
+    fallback_delta: torch.Tensor,
+    idx_to_token_id: dict[int, int],
     n_activated: int,
     n_deactivated: int,
     eps: float = 0.01,
+    fallback_threshold: int = 5,
 ) -> None:
     mc = llm.model_config
     _, num_experts_per_tok, _ = MOE_EXPERT_CONFIG[mc.model]
-    manual_weights = risk_diff_to_manual_weights(
-        delta, num_experts_per_tok, n_activated, n_deactivated
-    )
+
+    fallback_weights = risk_diff_to_manual_weights(
+        fallback_delta, num_experts_per_tok, n_activated, n_deactivated
+    )  # (layers, experts)
+
+    vocab_size = int(mc.hf_config.vocab_size)
+    manual_weights = [fallback_weights.clone() for _ in range(vocab_size)]
+
+    for i, (delta, freq) in tqdm(
+        enumerate(zip(token_wise_delta, token_freq)),
+        desc="Building manual weights",
+        total=len(token_wise_delta),
+    ):
+        if freq <= fallback_threshold:
+            continue
+        token_id = idx_to_token_id[i]
+        manual_weights[token_id] = risk_diff_to_manual_weights(
+            delta, num_experts_per_tok, n_activated, n_deactivated
+        )
+
+    manual_weights = torch.stack(manual_weights)  # (vocab, layers, experts)
 
     def apply(self):
         model = self.model_runner.model
-        model.add_steermoe_manual_args(manual_weights.clone(), eps)
+        model.add_toksteermoe_manual_args(manual_weights.clone(), eps)
         return ""
 
     llm.collective_rpc(apply)
+
+
+def faithfulness_unique_token_ids(model_name: ModelName) -> set[int]:
+    dataset = SQuAD()
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    unique_token_ids: set[int] = set()
+    for example in tqdm(dataset, desc="Collecting unique tokens"):
+        question = f"Question: {example['question']}"
+        for q_variant in [question, f" {question}"]:
+            unique_token_ids.update(
+                tokenizer.encode(q_variant, add_special_tokens=False)
+            )
+
+    return unique_token_ids
+
+
+def build_token_index_lookup(
+    task: str, model_name: ModelName
+) -> tuple[dict[int, int], dict[int, int]]:
+    if task == "faithfulness":
+        unique_token_ids = sorted(faithfulness_unique_token_ids(model_name))
+
+    index_to_token_id: dict[int, int] = {}
+    token_id_to_index: dict[int, int] = {}
+
+    for idx, tid in enumerate(unique_token_ids):
+        index_to_token_id[idx] = tid
+        token_id_to_index[tid] = idx
+
+    return index_to_token_id, token_id_to_index
 
 
 def main(
@@ -140,19 +191,27 @@ def main(
         model=model_name,
         max_model_len=4096,
         tensor_parallel_size=torch.cuda.device_count(),
-        gpu_memory_utilization=0.95,
+        gpu_memory_utilization=0.49,
         max_num_seqs=1,
         enforce_eager=True,
         enable_prefix_caching=False,
         trust_remote_code=True,
     )
 
-    delta = calculate_delta(
+    delta, token_wise_delta, token_freq = calculate_delta(
         model_name=model_name, task=task, activations_dir=activations_dir
-    )
+    )  # delta: (layers, experts), token_wise_delta: (layers, experts, vocab), token_freq: (vocab)
+
+    token_wise_delta = token_wise_delta.permute(2, 0, 1)  # (vocab, layers, experts)
+
+    idx_to_token_id, _ = build_token_index_lookup(task=task, model_name=model_name)
+
     steer(
         llm=llm,
-        delta=delta,
+        token_wise_delta=token_wise_delta,
+        token_freq=token_freq,
+        fallback_delta=delta,
+        idx_to_token_id=idx_to_token_id,
         n_activated=n_activated,
         n_deactivated=n_deactivated,
         eps=0.01,
@@ -184,6 +243,7 @@ def main(
             batch_size=4,
         )
         print(score)
+        exit()
 
         score = cf_trivia_qa.infer(
             llm=llm,

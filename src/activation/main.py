@@ -3,7 +3,7 @@ import os
 
 from transformers import AutoConfig, AutoTokenizer
 
-
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 os.environ["LLM_REGISTRATION"] = "activation"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
@@ -290,6 +290,7 @@ def faithfulness_activations(
         enforce_eager=True,
         enable_prefix_caching=False,
         trust_remote_code=True,
+        gpu_memory_utilization=0.49,
     )
 
     A1, N1 = collect_prompt_activations(

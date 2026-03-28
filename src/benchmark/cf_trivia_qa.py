@@ -2,36 +2,20 @@ import json
 import os
 from typing import Any
 
-from torch.utils.data import DataLoader, Dataset, Subset
 from tqdm.auto import tqdm
+from torch.utils.data import DataLoader, Subset
 from vllm import LLM, SamplingParams
 
-from src.steermoe.inference import util
-from src.steermoe.inference.dataset import MQuAKE
+from src.benchmark import util
+from src.benchmark.dataset import CFTriviaQA
 
 
-def format_facts(case: dict[str, Any]) -> list[str]:
-    facts: list[str] = []
-    for rr in case.get("requested_rewrite", []):
-        prompt = (rr.get("prompt") or "").strip()
-        subject = (rr.get("subject") or "").strip()
-        target_new = ((rr.get("target_new") or {}).get("str") or "").strip()
-        if not (prompt and subject and target_new):
-            continue
-        try:
-            prefix = prompt.format(subject).strip()
-        except Exception:
-            # If prompt formatting fails, fall back to a simple "subject -> new" statement.
-            prefix = subject
-        facts.append(f"{prefix} {target_new}".strip())
-    return facts
+def build_prompt(item: dict[str, Any]) -> str:
+    document = item["paragraph_text"]
+    question = item["question_text"]
 
-
-def build_prompt(*, facts: list[str], question: str) -> str:
-    facts_block = "\n".join(f"- {f}" for f in facts) if facts else "- (none)"
     return (
-        "Document:\n"
-        f"{facts_block}\n\n"
+        f"Document: {document}\n\n"
         f"Question: {question}\n\n"
         "You are an expert in retrieval-based question answering. "
         "Please respond with the exact answer, using only the information provided in the context. "
@@ -47,38 +31,10 @@ def score(jsonl_path: str) -> dict[str, float | int]:
                 continue
             record = json.loads(line)
             total += 1
-            output_lower = str(record.get("model_output", "")).lower()
-            if any(
-                str(candidate).lower() in output_lower
-                for candidate in record.get("candidate_answers", [])
-            ):
+            if record["answer"].lower() in record["model_output"].lower():
                 correct += 1
     accuracy = correct / total if total > 0 else 0.0
     return {"total": total, "correct": correct, "accuracy": accuracy}
-
-
-class FlattenedMQuAKEQuestions(Dataset):
-    def __init__(self, base_ds: MQuAKE) -> None:
-        self._records: list[dict[str, Any]] = []
-        for case in base_ds:
-            candidate_answers = [case["new_answer"], *case.get("new_answer_alias", [])]
-            facts = format_facts(case)
-            for question_idx, question in enumerate(case["questions"]):
-                self._records.append(
-                    {
-                        "case_id": int(case["case_id"]),
-                        "question_idx": int(question_idx),
-                        "question": question,
-                        "candidate_answers": candidate_answers,
-                        "requested_rewrite_facts": facts,
-                    }
-                )
-
-    def __len__(self) -> int:
-        return len(self._records)
-
-    def __getitem__(self, idx: int) -> dict[str, Any]:
-        return self._records[idx]
 
 
 def infer(
@@ -87,13 +43,11 @@ def infer(
     checkpoint_dir: str,
     pass_name: str,
     batch_size: int = 4,
-) -> dict[str, float | int]:
+) -> str:
     model_name = llm.model_config.model
-    dataset_name = "mquake"
+    dataset_name = "cf_trivia_qa"
 
-    base_ds = MQuAKE()
-    ds = FlattenedMQuAKEQuestions(base_ds)
-
+    ds = CFTriviaQA()
     outputs_jsonl_path = util.output_jsonl_path(
         checkpoint_dir=checkpoint_dir,
         dataset_name=dataset_name,
@@ -127,15 +81,12 @@ def infer(
     )
 
     with open(outputs_jsonl_path, file_mode, encoding="utf-8") as out_f:
-        for batch_examples in tqdm(loader, desc="MQuAKE inference"):
+        for batch_examples in tqdm(loader, desc="CF Trivia QA inference"):
             batch_prompts = [
                 [
                     {
                         "role": "user",
-                        "content": build_prompt(
-                            facts=item["requested_rewrite_facts"],
-                            question=item["question"],
-                        ),
+                        "content": build_prompt(item),
                     }
                 ]
                 for item in batch_examples
@@ -154,13 +105,14 @@ def infer(
             for item, prompt, output in zip(
                 batch_examples, batch_prompts, batch_outputs
             ):
-                output_text = output.outputs[0].text.strip()
+                output_text = output.outputs[0].text
                 record = {
-                    "case_id": item["case_id"],
-                    "question_idx": item["question_idx"],
-                    "question": item["question"],
-                    "candidate_answers": item["candidate_answers"],
-                    "requested_rewrite_facts": item["requested_rewrite_facts"],
+                    "id": item["question_id"],
+                    "answer": item["annotation"]["answer"][0]["paragraph_reference"][
+                        "string"
+                    ],
+                    "question": item["question_text"],
+                    "document": item["paragraph_text"],
                     "prompt": prompt,
                     "model_output": output_text,
                     "model_output_raw": output_text,
