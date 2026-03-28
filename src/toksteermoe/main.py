@@ -243,7 +243,6 @@ def main(
             batch_size=4,
         )
         print(score)
-        exit()
 
         score = cf_trivia_qa.infer(
             llm=llm,
