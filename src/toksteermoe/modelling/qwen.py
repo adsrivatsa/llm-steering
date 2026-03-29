@@ -221,7 +221,13 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             is_sequence_parallel=self.is_sequence_parallel,
         )
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        # * Added
+        input_ids: torch.Tensor | None = None,
+        # * Added
+    ) -> torch.Tensor:
         assert hidden_states.dim() <= 2, (
             "Qwen3MoeSparseMoeBlock only supports 1D or 2D inputs"
         )
@@ -237,18 +243,23 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
 
         # * Added
 
-        moe_manual_weights = self.steermoe_manual_weights.to(router_logits.device)
+        moe_manual_weights = self.toksteermoe_manual_weights.to(
+            router_logits.device
+        )  # (vocab, experts)
+        moe_manual_weights = moe_manual_weights[input_ids]  # (T, experts)
         eps = self.eps
 
-        router_logits = torch.nn.functional.log_softmax(router_logits, dim=-1)
+        router_logits = torch.nn.functional.log_softmax(
+            router_logits, dim=-1
+        )  # (T, experts)
 
-        s_max = router_logits.max(dim=-1).values.unsqueeze(-1)
-        s_min = router_logits.min(dim=-1).values.unsqueeze(-1)
-        pos_mask = moe_manual_weights > 0
-        neg_mask = moe_manual_weights < 0
+        s_max = router_logits.max(dim=-1).values.unsqueeze(-1)  # (T, 1)
+        s_min = router_logits.min(dim=-1).values.unsqueeze(-1)  # (T, 1)
+        pos_mask = moe_manual_weights > 0  # (T)
+        neg_mask = moe_manual_weights < 0  #  (T)
 
-        router_logits[:, pos_mask] = s_max + eps
-        router_logits[:, neg_mask] = s_min - eps
+        router_logits[:, pos_mask] = s_max + eps  # (T, experts)
+        router_logits[:, neg_mask] = s_min - eps  # (T, experts)
 
         # * Added
 
@@ -433,6 +444,9 @@ class Qwen3MoeDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
+        # * Added
+        input_ids: torch.Tensor | None = None,
+        # * Added
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
@@ -447,7 +461,12 @@ class Qwen3MoeDecoderLayer(nn.Module):
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(
+            hidden_states,
+            # * Added
+            input_ids=input_ids,
+            # * Added
+        )
         return hidden_states, residual
 
 
@@ -515,7 +534,14 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            hidden_states, residual = layer(
+                positions,
+                hidden_states,
+                residual,
+                # * Added
+                input_ids=input_ids,
+                # * Added
+            )
             self._maybe_add_hidden_state(
                 aux_hidden_states, layer_idx + 1, hidden_states, residual
             )
@@ -759,8 +785,10 @@ class Qwen3MoeForCausalLM(
         # * Added
 
         zero_manual_weights = torch.zeros(
-            self.config.num_hidden_layers, self.config.num_local_experts
-        )
+            self.config.vocab_size,
+            self.config.num_hidden_layers,
+            self.config.num_experts,
+        )  # (vocab, layers, experts)
         self.add_steermoe_manual_args(zero_manual_weights, 0)
 
         # * Added
@@ -769,11 +797,13 @@ class Qwen3MoeForCausalLM(
 
     def add_steermoe_manual_args(self, manual_weights, eps):
         """
-        manual_weights: Tensor of shape (layers, experts)
+        manual_weights: (vocab, layers, experts)
         """
         for layer_idx, layer in enumerate(self.model.layers):
             layer_moe_block = layer.mlp
-            layer_moe_block.steermoe_manual_weights = manual_weights[layer_idx]
+            layer_moe_block.toksteermoe_manual_weights = manual_weights[
+                :, layer_idx, :
+            ]  # (vocab, experts)
             layer_moe_block.eps = eps
 
     # * Added

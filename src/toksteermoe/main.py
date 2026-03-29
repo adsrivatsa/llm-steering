@@ -55,14 +55,14 @@ def calculate_delta(model_name: ModelName, task: str, activations_dir: str):
     x1_data = checkpoint.load(activations_dir, "x1", train_dataset, model_name)
     x2_data = checkpoint.load(activations_dir, "x2", train_dataset, model_name)
 
-    A1, N1 = x1_data["A"], x1_data["N"]
-    A2, N2 = x2_data["A"], x2_data["N"]
+    A1, N1 = x1_data["A"], x1_data["N"]  # A1: (layers, experts, vocab), N1: (vocab)
+    A2, N2 = x2_data["A"], x2_data["N"]  # A2: (layers, experts, vocab), N2: (vocab)
 
-    p1 = A1.sum(dim=-1) / N1.sum()
-    p2 = A2.sum(dim=-1) / N2.sum()
+    p1 = A1.sum(dim=-1) / N1.sum()  # (layers, experts)
+    p2 = A2.sum(dim=-1) / N2.sum()  # (layers, experts)
 
-    delta = torch.nan_to_num(p1) - torch.nan_to_num(p2)
-    token_wise_delta = A1 - A2
+    delta = torch.nan_to_num(p1) - torch.nan_to_num(p2)  # (layers, experts)
+    token_wise_delta = A1 - A2  # (layers, experts, vocab)
 
     assert (N1 - N2).sum() == 0
 
@@ -74,11 +74,13 @@ def risk_diff_to_manual_weights(
 ) -> torch.Tensor:
     d = delta.detach().cpu().float()
     num_layers, num_experts = d.shape
-    moe_manual_weights = torch.zeros(num_layers, num_experts, dtype=torch.float32)
+    moe_manual_weights = torch.zeros(
+        num_layers, num_experts, dtype=torch.float32
+    )  # (layers, experts)
 
-    flat = d.reshape(-1)
-    order = torch.argsort(flat.abs(), descending=True)
-    pos_per_layer = torch.zeros(num_layers, dtype=torch.int64)
+    flat = d.reshape(-1)  # (layers * experts)
+    order = torch.argsort(flat.abs(), descending=True)  # (layers * experts)
+    pos_per_layer = torch.zeros(num_layers, dtype=torch.int64)  # (layers)
     total_pos = 0
     total_neg = 0
 
@@ -191,7 +193,6 @@ def main(
         model=model_name,
         max_model_len=4096,
         tensor_parallel_size=torch.cuda.device_count(),
-        gpu_memory_utilization=0.49,
         max_num_seqs=1,
         enforce_eager=True,
         enable_prefix_caching=False,

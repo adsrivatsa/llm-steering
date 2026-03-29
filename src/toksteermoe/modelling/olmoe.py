@@ -121,19 +121,27 @@ class OlmoeMoE(nn.Module):
 
         # * Added
 
-        moe_manual_weights = self.toksteermoe_manual_weights.to(router_logits.device)
-        moe_manual_weights = moe_manual_weights[input_ids]
+        moe_manual_weights = self.toksteermoe_manual_weights.to(
+            router_logits.device
+        )  # (vocab, experts)
+        moe_manual_weights = moe_manual_weights[input_ids]  # (T, experts)
         eps = self.eps
 
-        router_logits = torch.nn.functional.log_softmax(router_logits, dim=-1)
+        router_logits = torch.nn.functional.log_softmax(
+            router_logits, dim=-1
+        )  # (T, experts)
 
-        s_max = router_logits.max(dim=-1).values.unsqueeze(-1)
-        s_min = router_logits.min(dim=-1).values.unsqueeze(-1)
-        pos_mask = moe_manual_weights > 0
-        neg_mask = moe_manual_weights < 0
+        s_max = router_logits.max(dim=-1).values.unsqueeze(-1)  # (T, 1)
+        s_min = router_logits.min(dim=-1).values.unsqueeze(-1)  # (T, 1)
+        pos_mask = moe_manual_weights > 0  # (T)
+        neg_mask = moe_manual_weights < 0  # (T)
 
-        router_logits = torch.where(pos_mask, s_max + eps, router_logits)
-        router_logits = torch.where(neg_mask, s_min - eps, router_logits)
+        router_logits = torch.where(
+            pos_mask, s_max + eps, router_logits
+        )  # (T, experts)
+        router_logits = torch.where(
+            neg_mask, s_min - eps, router_logits
+        )  # (T, experts)
 
         # * Added
 
@@ -289,12 +297,12 @@ class OlmoeDecoderLayer(nn.Module):
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-
-        # * Added
-
-        hidden_states = self.mlp(hidden_states, input_ids=input_ids)
-
-        # * Added
+        hidden_states = self.mlp(
+            hidden_states,
+            # * Added
+            input_ids=input_ids,
+            # * Added
+        )
 
         return hidden_states, residual
 
@@ -512,7 +520,7 @@ class OlmoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
 
         zero_manual_weights = torch.zeros(
             config.vocab_size, config.num_hidden_layers, config.num_experts
-        )
+        )  # (vocab, layers, experts)
         self.add_toksteermoe_manual_args(zero_manual_weights, 0)
 
         # * Added
@@ -525,7 +533,9 @@ class OlmoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         """
         for layer_idx, layer in enumerate(self.model.layers):
             layer_moe_block = layer.mlp
-            layer_moe_block.toksteermoe_manual_weights = manual_weights[:, layer_idx, :]
+            layer_moe_block.toksteermoe_manual_weights = manual_weights[
+                :, layer_idx, :
+            ]  # (vocab, experts)
             layer_moe_block.eps = eps
 
     # * Added
