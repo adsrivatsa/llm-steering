@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --account=robinjia_1822
-#SBATCH --job-name=collect-olmoe-steermoe-inference
+#SBATCH --job-name=collect-phi-steermoe-inference
 #SBATCH --output=logs/%x-%A_%a.out
 #SBATCH --error=logs/%x-%A_%a.err
 #SBATCH --nodes=1
@@ -22,6 +22,12 @@ LLM_NAME="microsoft/Phi-3.5-MoE-instruct"
 TASK="faithfulness"
 
 cd "$SLURM_SUBMIT_DIR"
+
+module purge
+module load gcc/13.3.0
+module load python/3.12
+export TRITON_CACHE_DIR=/scratch1/${SLURM_JOB_USER}/.triton_cache
+mkdir -p "$TRITON_CACHE_DIR"
 
 # threading fix
 export OPENBLAS_NUM_THREADS="$SLURM_CPUS_PER_TASK"
