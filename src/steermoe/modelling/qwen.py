@@ -237,15 +237,19 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
 
         # * Added
 
-        moe_manual_weights = self.steermoe_manual_weights.to(router_logits.device)
+        moe_manual_weights = self.steermoe_manual_weights.to(
+            router_logits.device
+        )  # (experts)
         eps = self.eps
 
-        router_logits = torch.nn.functional.log_softmax(router_logits, dim=-1)
+        router_logits = torch.nn.functional.log_softmax(
+            router_logits, dim=-1
+        )  # (T, experts)
 
-        s_max = router_logits.max(dim=-1).values.unsqueeze(-1)
-        s_min = router_logits.min(dim=-1).values.unsqueeze(-1)
-        pos_mask = moe_manual_weights > 0
-        neg_mask = moe_manual_weights < 0
+        s_max = router_logits.max(dim=-1).values.unsqueeze(-1)  # (T, 1)
+        s_min = router_logits.min(dim=-1).values.unsqueeze(-1)  # (T, 1)
+        pos_mask = moe_manual_weights > 0  # (T)
+        neg_mask = moe_manual_weights < 0  # (T)
 
         router_logits[:, pos_mask] = s_max + eps
         router_logits[:, neg_mask] = s_min - eps

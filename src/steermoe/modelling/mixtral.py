@@ -155,15 +155,19 @@ class MixtralMoE(nn.Module):
 
         # * Added
 
-        moe_manual_weights = self.steermoe_manual_weights.to(router_logits.device)
+        moe_manual_weights = self.steermoe_manual_weights.to(
+            router_logits.device
+        )  # (experts)
         eps = self.eps
 
-        router_logits = torch.nn.functional.log_softmax(router_logits, dim=-1)
+        router_logits = torch.nn.functional.log_softmax(
+            router_logits, dim=-1
+        )  # (T, experts)
 
-        s_max = router_logits.max(dim=-1).values.unsqueeze(-1)
-        s_min = router_logits.min(dim=-1).values.unsqueeze(-1)
-        pos_mask = moe_manual_weights > 0
-        neg_mask = moe_manual_weights < 0
+        s_max = router_logits.max(dim=-1).values.unsqueeze(-1)  # (T, 1)
+        s_min = router_logits.min(dim=-1).values.unsqueeze(-1)  # (T, 1)
+        pos_mask = moe_manual_weights > 0  # (T)
+        neg_mask = moe_manual_weights < 0  # (T)
 
         router_logits[:, pos_mask] = s_max + eps
         router_logits[:, neg_mask] = s_min - eps
@@ -576,7 +580,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
 
         zero_manual_weights = torch.zeros(
             self.config.num_hidden_layers, self.config.num_local_experts
-        )
+        )  # (layers, experts)
         self.add_steermoe_manual_args(zero_manual_weights, 0)
 
         # * Added
@@ -589,7 +593,9 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
         """
         for layer_idx, layer in enumerate(self.model.layers):
             layer_moe_block = layer.block_sparse_moe
-            layer_moe_block.steermoe_manual_weights = manual_weights[layer_idx]
+            layer_moe_block.steermoe_manual_weights = manual_weights[
+                layer_idx
+            ]  # (experts)
             layer_moe_block.eps = eps
 
     # * Added

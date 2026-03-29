@@ -60,13 +60,13 @@ def calculate_delta(model_name: ModelName, task: str, activations_dir: str):
     x1_data = checkpoint.load(activations_dir, "x1", train_dataset, model_name)
     x2_data = checkpoint.load(activations_dir, "x2", train_dataset, model_name)
 
-    A1, N1 = x1_data["A"], x1_data["N"]
-    A2, N2 = x2_data["A"], x2_data["N"]
+    A1, N1 = x1_data["A"], x1_data["N"]  # A1: (layers, experts, vocab), N1: (vocab)
+    A2, N2 = x2_data["A"], x2_data["N"]  # A2: (layers, experts, vocab), N2: (vocab)
 
-    p1 = A1.sum(dim=-1) / N1.sum()
-    p2 = A2.sum(dim=-1) / N2.sum()
+    p1 = A1.sum(dim=-1) / N1.sum()  # (layers, experts)
+    p2 = A2.sum(dim=-1) / N2.sum()  # (layers, experts)
 
-    delta = torch.nan_to_num(p1) - torch.nan_to_num(p2)
+    delta = torch.nan_to_num(p1) - torch.nan_to_num(p2)  # (layers, experts)
 
     return delta
 
@@ -76,11 +76,13 @@ def risk_diff_to_manual_weights(
 ) -> torch.Tensor:
     d = delta.detach().cpu().float()
     num_layers, num_experts = d.shape
-    moe_manual_weights = torch.zeros(num_layers, num_experts, dtype=torch.float32)
+    moe_manual_weights = torch.zeros(
+        num_layers, num_experts, dtype=torch.float32
+    )  # (layers, experts)
 
-    flat = d.reshape(-1)
-    order = torch.argsort(flat.abs(), descending=True)
-    pos_per_layer = torch.zeros(num_layers, dtype=torch.int64)
+    flat = d.reshape(-1)  # (layers * experts)
+    order = torch.argsort(flat.abs(), descending=True)  # (layers * experts)
+    pos_per_layer = torch.zeros(num_layers, dtype=torch.int64)  # (layers)
     total_pos = 0
     total_neg = 0
 
@@ -116,7 +118,7 @@ def steer(
     _, num_experts_per_tok, _ = MOE_EXPERT_CONFIG[mc.model]
     manual_weights = risk_diff_to_manual_weights(
         delta, num_experts_per_tok, n_activated, n_deactivated
-    )
+    )  # (layers, experts)
 
     def apply(self):
         model = self.model_runner.model
@@ -149,7 +151,7 @@ def main(
 
     delta = calculate_delta(
         model_name=model_name, task=task, activations_dir=activations_dir
-    )
+    )  # (layers, experts)
     steer(
         llm=llm,
         delta=delta,
