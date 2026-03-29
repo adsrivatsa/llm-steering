@@ -160,7 +160,7 @@ def main(
         eps=0.01,
     )
 
-    pass_name = f"a{n_activated}_d{n_deactivated}"
+    pass_name = f"steermoe_a{n_activated}_d{n_deactivated}"
 
     if task == "faithfulness":
         score = faitheval_counterfactual.infer(
