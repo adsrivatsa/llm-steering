@@ -28,11 +28,14 @@ We recommend using `uv` for environment management as defined in our `pyproject.
 # Clone the repository
 git clone [https://github.com/yourusername/llm-steering.git](https://github.com/yourusername/llm-steering.git)
 cd llm-steering
+```
 
+```bash
 # Install dependencies using uv
 uv venv
 source .venv/bin/activate
 uv pip install -e .
+```
 
 
 *Note: Ensure the local `vllm-0.18.0+cu126-cp312-cp312-linux_x86_64.whl` wheel is present in the root directory prior to installation.*
