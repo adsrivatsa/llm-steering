@@ -3,4 +3,3 @@ __pycache__
 *.png
 uv.lock
 activations/
-inference/**/*.jsonl
