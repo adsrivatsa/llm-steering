@@ -1,6 +1,6 @@
 import os
 import re
-from typing import Literal
+from typing import List, Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -26,6 +26,47 @@ ModelName = Literal[
 ]
 
 
+def save_heatmap(
+    model_name: ModelName,
+    algorithm: str,
+    visualization_dir: str,
+    benchmark_name: str,
+    data: List[List[int]],
+    act_labels: List[int],
+    deact_labels: List[int],
+):
+    fig, ax = plt.subplots(
+        figsize=(max(6, len(deact_labels) * 0.6), max(5, len(act_labels) * 0.5))
+    )
+
+    heatmap_kw: dict = {
+        "data": data,
+        "ax": ax,
+        "xticklabels": deact_labels,
+        "yticklabels": act_labels[::-1],
+        "annot": True,
+        "fmt": ".3f",
+        "cmap": "viridis",
+    }
+
+    if np.isfinite(data).any():
+        heatmap_kw["vmin"] = float(np.nanmin(data))
+        heatmap_kw["vmax"] = float(np.nanmax(data))
+
+    sns.heatmap(**heatmap_kw)
+    ax.set_xlabel("n_deactivated")
+    ax.set_ylabel("n_activated")
+    ax.set_title(f"{benchmark_name}\n{algorithm} ({model_name})")
+    fig.tight_layout()
+
+    folder = os.path.join(visualization_dir, "heatmap", model_name)
+    os.makedirs(folder, exist_ok=True)
+
+    out_path = os.path.join(folder, f"{algorithm}_{benchmark_name}_heatmap.png")
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
 def main(
     model_name: ModelName, algorithm: str, inference_dir: str, visualization_dir: str
 ):
@@ -41,6 +82,8 @@ def main(
     }
 
     pattern = rf"{algorithm}_a(\d+)_d(\d+)"
+
+    cum_heatmap = None
 
     for benchmark_name, score_fn in benchmarks.items():
         n_activateds, n_deactivateds = set({}), set({})
@@ -61,42 +104,35 @@ def main(
         act_labels = sorted(list(n_activateds))
         deact_labels = sorted(list(n_deactivateds))
         heatmap = [[0] * len(deact_labels) for _ in range(len(act_labels))]
+        if not cum_heatmap:
+            cum_heatmap = [[0] * len(deact_labels) for _ in range(len(act_labels))]
 
         for i, act in enumerate(act_labels):
             for j, deact in enumerate(deact_labels):
                 heatmap[i][j] = scores[(act, deact)]
+                cum_heatmap[i][j] += scores[(act, deact)]
 
-        data = np.asarray(heatmap, dtype=np.float64)[::-1, :]
-        fig, ax = plt.subplots(
-            figsize=(max(6, len(deact_labels) * 0.6), max(5, len(act_labels) * 0.5))
+        heatmap = np.asarray(heatmap, dtype=np.float64)[::-1, :]
+        save_heatmap(
+            model_name=model_name,
+            algorithm=algorithm,
+            visualization_dir=visualization_dir,
+            benchmark_name=benchmark_name,
+            data=heatmap,
+            act_labels=act_labels,
+            deact_labels=deact_labels,
         )
 
-        heatmap_kw: dict = {
-            "data": data,
-            "ax": ax,
-            "xticklabels": deact_labels,
-            "yticklabels": act_labels[::-1],
-            "annot": True,
-            "fmt": ".3f",
-            "cmap": "viridis",
-        }
-
-        if np.isfinite(data).any():
-            heatmap_kw["vmin"] = float(np.nanmin(data))
-            heatmap_kw["vmax"] = float(np.nanmax(data))
-
-        sns.heatmap(**heatmap_kw)
-        ax.set_xlabel("n_deactivated")
-        ax.set_ylabel("n_activated")
-        ax.set_title(f"{benchmark_name} — {algorithm} ({model_name})")
-        fig.tight_layout()
-
-        folder = os.path.join(visualization_dir, "heatmap", model_name)
-        os.makedirs(folder, exist_ok=True)
-
-        out_path = os.path.join(folder, f"{algorithm}_{benchmark_name}_heatmap.png")
-        fig.savefig(out_path, dpi=150)
-        plt.close(fig)
+    cum_heatmap = np.array(cum_heatmap, dtype=np.float64)[::-1, :] / len(benchmarks)
+    save_heatmap(
+        model_name=model_name,
+        algorithm=algorithm,
+        visualization_dir=visualization_dir,
+        benchmark_name="all",
+        data=cum_heatmap,
+        act_labels=act_labels,
+        deact_labels=deact_labels,
+    )
 
 
 if __name__ == "__main__":
