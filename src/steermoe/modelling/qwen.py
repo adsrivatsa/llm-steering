@@ -763,7 +763,7 @@ class Qwen3MoeForCausalLM(
         # * Added
 
         zero_manual_weights = torch.zeros(
-            self.config.num_hidden_layers, self.config.num_local_experts
+            self.config.num_hidden_layers, self.config.num_experts
         )
         self.add_steermoe_manual_args(zero_manual_weights, 0)
 
