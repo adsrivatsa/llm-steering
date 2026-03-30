@@ -1,6 +1,6 @@
 import os
 
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 
 from src import checkpoint
 from src.activation.dataset import SQuAD
@@ -46,6 +46,31 @@ MOE_EXPERT_CONFIG: dict[ModelName, tuple[int, int, int]] = {
     "allenai/OLMoE-1B-7B-0125-Instruct": (16, 8, 64),
     "microsoft/Phi-3.5-MoE-instruct": (32, 2, 16),
 }
+
+
+def resolve_parallelism(model_name: str) -> tuple[int, int]:
+    """Return (tensor_parallel_size, pipeline_parallel_size) for the available GPUs.
+
+    Prefers full tensor parallelism. Falls back to full pipeline parallelism when
+    the number of KV attention heads is not divisible by the GPU count (e.g. 3 GPUs).
+    """
+    n_gpus = torch.cuda.device_count()
+    print(n_gpus)
+    if n_gpus <= 1:
+        return 1, 1
+
+    config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+    # num_key_value_heads is the binding TP constraint; fall back to full heads for MHA models
+    kv_heads = getattr(
+        config,
+        "num_key_value_heads",
+        getattr(config, "num_attention_heads", None),
+    )
+
+    if kv_heads is not None and kv_heads % n_gpus == 0:
+        return n_gpus, 1  # tensor parallelism
+
+    return 1, n_gpus  # pipeline parallelism
 
 
 def calculate_delta(model_name: ModelName, task: str, activations_dir: str):
@@ -189,10 +214,15 @@ def main(
 ):
     register_vllm_models()
 
+    tp, pp = resolve_parallelism(model_name)
+    print(f"Parallelism: tensor_parallel_size={tp}, pipeline_parallel_size={pp}")
+
     llm = LLM(
         model=model_name,
         max_model_len=4096,
-        tensor_parallel_size=torch.cuda.device_count(),
+        tensor_parallel_size=tp,
+        pipeline_parallel_size=pp,
+        gpu_memory_utilization=0.98,
         max_num_seqs=1,
         enforce_eager=True,
         enable_prefix_caching=False,

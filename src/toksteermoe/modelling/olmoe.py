@@ -532,6 +532,9 @@ class OlmoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         manual_weights: (vocab, layers, experts)
         """
         for layer_idx, layer in enumerate(self.model.layers):
+            if not hasattr(layer, "mlp"):
+                continue
+
             layer_moe_block = layer.mlp
             layer_moe_block.toksteermoe_manual_weights = manual_weights[
                 :, layer_idx, :
