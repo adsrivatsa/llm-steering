@@ -620,6 +620,9 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
         manual_weights: (vocab, layers, experts)
         """
         for layer_idx, layer in enumerate(self.model.layers):
+            if not hasattr(layer, "block_sparse_moe"):
+                continue
+
             layer_moe_block = layer.block_sparse_moe
             layer_moe_block.toksteermoe_manual_weights = manual_weights[
                 :, layer_idx, :

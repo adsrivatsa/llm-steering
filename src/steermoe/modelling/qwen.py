@@ -776,6 +776,9 @@ class Qwen3MoeForCausalLM(
         manual_weights: Tensor of shape (layers, experts)
         """
         for layer_idx, layer in enumerate(self.model.layers):
+            if not hasattr(layer, "mlp"):
+                continue
+
             layer_moe_block = layer.mlp
             layer_moe_block.steermoe_manual_weights = manual_weights[layer_idx]
             layer_moe_block.eps = eps
