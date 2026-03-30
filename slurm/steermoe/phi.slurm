@@ -6,10 +6,10 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=5
-#SBATCH --gpus-per-task=3
+#SBATCH --gpus-per-task=2
 #SBATCH --partition=gpu
 #SBATCH --array=0-35
-#SBATCH --constraint="a100|l40s|a40"
+#SBATCH --constraint="l40s"
 #SBATCH --mem=24G
 #SBATCH --time=08:00:00
 
