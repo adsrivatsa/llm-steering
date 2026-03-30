@@ -173,7 +173,6 @@ def main(
         max_model_len=4096,
         tensor_parallel_size=tp,
         pipeline_parallel_size=pp,
-        gpu_memory_utilization=0.75,
         max_num_seqs=1,
         enforce_eager=True,
         enable_prefix_caching=False,
