@@ -1,3 +1,4 @@
+import argparse
 import os
 import re
 from typing import List, Literal
@@ -68,18 +69,23 @@ def save_heatmap(
 
 
 def main(
-    model_name: ModelName, algorithm: str, inference_dir: str, visualization_dir: str
+    model_name: ModelName,
+    task: str,
+    algorithm: str,
+    inference_dir: str,
+    visualization_dir: str,
 ):
     model_name = checkpoint.safe_model_name(model_name)
 
-    benchmarks = {
-        "cf_trivia_qa": cf_trivia_qa.score,
-        "faitheval_counterfactual": faitheval_counterfactual.score,
-        "faitheval_inconsistent": faitheval_inconsistent.score,
-        "faitheval_unanswerable": faitheval_unanswerable.score,
-        "mctest": mctest.score,
-        "mquake": mquake.score,
-    }
+    if task == "faithfulness":
+        benchmarks = {
+            "cf_trivia_qa": cf_trivia_qa.score,
+            "faitheval_counterfactual": faitheval_counterfactual.score,
+            "faitheval_inconsistent": faitheval_inconsistent.score,
+            "faitheval_unanswerable": faitheval_unanswerable.score,
+            "mctest": mctest.score,
+            "mquake": mquake.score,
+        }
 
     pattern = rf"{algorithm}_a(\d+)_d(\d+)"
 
@@ -136,9 +142,35 @@ def main(
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--algorithm", type=str, choices=["steermoe", "toksteermoe"], default="steermoe"
+    )
+    parser.add_argument(
+        "--task", type=str, choices=["faithfulness"], default="faithfulness"
+    )
+    parser.add_argument(
+        "--llm",
+        "--model",
+        dest="model_name",
+        type=str,
+        default="allenai/OLMoE-1B-7B-0125-Instruct",
+    )
+    parser.add_argument("--inference-dir", type=str, default="inference")
+    parser.add_argument("--visualization-dir", type=str, default="visualization")
+
+    args = parser.parse_args()
+    algorithm: str = args.algorithm
+    task: str = args.task
+    model_name: ModelName = args.model_name
+    inference_dir: str = args.inference_dir
+    visualization_dir: str = args.visualization_dir
+
     main(
-        algorithm="steermoe",
-        model_name="allenai/OLMoE-1B-7B-0125-Instruct",
-        inference_dir="inference",
-        visualization_dir="visualization",
+        algorithm=algorithm,
+        task=task,
+        model_name=model_name,
+        inference_dir=inference_dir,
+        visualization_dir=visualization_dir,
     )
