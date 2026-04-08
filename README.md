@@ -47,4 +47,4 @@ Our approach is evaluated across two primary axes:
 2. **Safety:** Evaluated using TDC2023, MaliciousInstruct, and AdvBench, utilizing Llama-Guard-3-8B as a judge.
 
 ## 👥 Authors
-Abhinav Srivatsa, Bhushan Shankar Halasagi, Carl Cheng, Harsh Sharma, Nima Kelidari *(CSCI 544)*
+Abhinav Srivatsa, Carl Cheng, Nima Kelidari, Bhushan Shankar Halasagi, Harsh Sharma *(CSCI 544)*
