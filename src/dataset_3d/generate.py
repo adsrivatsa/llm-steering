@@ -214,7 +214,7 @@ def collect_pass_data(
                 if logits.dim() == 3:
                     logits = logits[0]           # remove batch dim
                 expert_logit = logits[abs_pos]   # (E,)
-                topk_idx = torch.topk(expert_logit, top_k).indices
+                topk_idx = torch.topk(expert_logit, top_k).indices.cpu()
                 A[layer, topk_idx, t_idx] += 1
 
                 if collect_hidden_states:
