@@ -44,7 +44,6 @@ python -m src.dataset_3d.generate \
     --model "allenai/OLMoE-1B-7B-0125-Instruct" \
     --output-dir "${SCRATCH_DIR}/dataset_3d/output" \
     --checkpoint-dir "${SCRATCH_DIR}/dataset_3d/checkpoints" \
-    --n-tokens 20000 \
     --chunk-size 2000 \
     --device cuda
 

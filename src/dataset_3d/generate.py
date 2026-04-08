@@ -374,7 +374,7 @@ def generate(
     print(f"Loading model: {model_name}")
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.float16,
+        dtype=torch.float16,
         device_map="auto",
         token=hf_token,
         trust_remote_code=True,

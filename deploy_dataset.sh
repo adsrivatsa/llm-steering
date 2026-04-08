@@ -10,10 +10,18 @@
 
 set -e
 
-# Initialize Lmod module system (required for non-interactive shells like SSH pipes)
+# Initialize Lmod/Module system (required for non-interactive shells like SSH pipes)
+# Try multiple standard CARC and Linux paths
 if [ -f /usr/share/lmod/lmod/init/bash ]; then
     source /usr/share/lmod/lmod/init/bash
+elif [ -f /etc/profile.d/modules.sh ]; then
+    source /etc/profile.d/modules.sh
+elif [ -f /usr/share/Modules/init/bash ]; then
+    source /usr/share/Modules/init/bash
 fi
+
+# Baseline profile sourcing
+[ -f /etc/profile ] && source /etc/profile
 
 PROJECT_DIR="/home1/${USER}/llm-steering"
 SCRATCH="/scratch1/${USER}"
@@ -38,6 +46,9 @@ echo "  Checkpoints: ${DATASET_DIR}/checkpoints"
 echo "  HF cache:    ${SCRATCH}/hf_cache"
 
 # --- Environment Setup ---
+export TMPDIR="${SCRATCH}/tmp"
+mkdir -p "${TMPDIR}"
+
 if [ ! -d ".venv" ]; then
     echo "  Creating virtual environment (.venv)..."
     module load python/3.12
@@ -55,9 +66,13 @@ if [ ! -f "$VLLM_WHEEL" ]; then
     echo "     (Please upload the wheel or update pyproject.toml if vllm is needed)"
 fi
 
-# Install dependencies in editable mode
-# Note: This might fail if the wheel above is missing and required.
-pip install -e . || echo "  ⚠️  Warning: pip install -e . failed. You may need to install dependencies manually."
+# Explicitly install core dependencies first to ensure they work even if -e . fails
+echo "  Installing core dependencies (torch, transformers, accelerate, datasets, tqdm)..."
+# Using --cache-dir to avoid /home1 space limits if needed
+pip install torch transformers accelerate datasets tqdm httpx --cache-dir "${SCRATCH}/.pip_cache"
+
+# Install remaining dependencies in editable mode
+pip install -e . || echo "  ⚠️  Warning: pip install -e . failed. You may need to install vLLM manually."
 
 echo ""
 echo "═══════════════════════════════════════════"
