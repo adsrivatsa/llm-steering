@@ -5,7 +5,7 @@ Produces:
   X: (N, L, D)     — averaged hidden states per token per layer
   Y: (N, L, E, 1)  — expert activation risk difference (classification target)
 
-N = number of selected tokens (middle 20K by frequency)
+N = number of selected tokens (all by default, or middle N by frequency)
 L = number of transformer layers
 E = number of experts per layer
 D = hidden state dimension
@@ -45,7 +45,7 @@ def load_squad(split: str = "train"):
 
 # ── Token Selection ───────────────────────────────────────────────────────────
 
-def select_middle_tokens(dataset, tokenizer, n_tokens: int = 20_000):
+def select_middle_tokens(dataset, tokenizer, n_tokens: int | None = None):
     """Select tokens with middle-range frequency from SQuAD questions.
 
     Returns:
@@ -65,7 +65,7 @@ def select_middle_tokens(dataset, tokenizer, n_tokens: int = 20_000):
     sorted_by_freq = sorted(token_freq.items(), key=lambda x: x[1])
     total = len(sorted_by_freq)
 
-    if total <= n_tokens:
+    if n_tokens is None or total <= n_tokens:
         selected_list = [t[0] for t in sorted_by_freq]
         freq_range = (sorted_by_freq[0][1], sorted_by_freq[-1][1])
     else:
@@ -343,7 +343,7 @@ def build_prompts(dataset):
 def generate(
     model_name: str,
     output_dir: str,
-    n_tokens: int = 20_000,
+    n_tokens: int | None = None,
     chunk_size: int = 2000,
     max_examples: int | None = None,
     checkpoint_dir: str | None = None,
@@ -423,7 +423,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--output-dir", type=str, default="dataset_3d_output")
     parser.add_argument("--checkpoint-dir", type=str, default="dataset_3d_ckpt")
-    parser.add_argument("--n-tokens", type=int, default=20_000)
+    parser.add_argument("--n-tokens", type=int, default=None)
     parser.add_argument("--chunk-size", type=int, default=2000)
     parser.add_argument("--max-examples", type=int, default=None)
     parser.add_argument("--device", type=str, default="cuda")
