@@ -10,6 +10,11 @@
 
 set -e
 
+# Initialize Lmod module system (required for non-interactive shells like SSH pipes)
+if [ -f /usr/share/lmod/lmod/init/bash ]; then
+    source /usr/share/lmod/lmod/init/bash
+fi
+
 PROJECT_DIR="/home1/${USER}/llm-steering"
 SCRATCH="/scratch1/${USER}"
 DATASET_DIR="${SCRATCH}/dataset_3d"
