@@ -1,12 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=dataset3d
-#SBATCH --account=kelidari_1006
+#SBATCH --account=robinjia_1822
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --gres=gpu:a100:1
+#SBATCH --gpus-per-task=1
+#SBATCH --constraint=v100
 #SBATCH --time=24:00:00
 #SBATCH --output=%x_%j.out
 #SBATCH --error=%x_%j.err
@@ -21,7 +22,7 @@ export HF_TOKEN="${HF_TOKEN}"
 export TRANSFORMERS_CACHE="${SCRATCH_DIR}/hf_cache"
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 
-cd /home1/kelidari/llm-steering
+cd "${SLURM_SUBMIT_DIR:-$HOME/llm-steering}"
 
 # ── Activate venv ─────────────────────────────────────────────────────────────
 source .venv/bin/activate

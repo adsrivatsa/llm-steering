@@ -1,0 +1,47 @@
+#!/bin/bash
+# ══════════════════════════════════════════════════════════════════════════════
+# deploy_dataset.sh — Piped to CARC via SSH
+#
+# Usage (from local Mac):
+#   ssh $USER@discovery1.usc.edu \
+#       "USER=$USER WANDB_API_KEY=$WANDB_API_KEY HF_TOKEN=$HF_TOKEN bash -s" \
+#       < deploy_dataset.sh
+# ══════════════════════════════════════════════════════════════════════════════
+
+set -e
+
+PROJECT_DIR="/home1/${USER}/llm-steering"
+SCRATCH="/scratch1/${USER}"
+DATASET_DIR="${SCRATCH}/dataset_3d"
+
+echo "═══════════════════════════════════════════"
+echo "  1 · Pull latest code"
+echo "═══════════════════════════════════════════"
+cd "${PROJECT_DIR}"
+git pull --ff-only
+echo "  ✅ Code up to date"
+
+echo ""
+echo "═══════════════════════════════════════════"
+echo "  2 · Setup directories & environment"
+echo "═══════════════════════════════════════════"
+mkdir -p "${DATASET_DIR}/output"
+mkdir -p "${DATASET_DIR}/checkpoints"
+mkdir -p "${SCRATCH}/hf_cache"
+echo "  Output:      ${DATASET_DIR}/output"
+echo "  Checkpoints: ${DATASET_DIR}/checkpoints"
+echo "  HF cache:    ${SCRATCH}/hf_cache"
+
+echo ""
+echo "═══════════════════════════════════════════"
+echo "  3 · Submit SLURM job"
+echo "═══════════════════════════════════════════"
+JOB_ID=$(sbatch --parsable \
+    --export=ALL,HF_TOKEN="${HF_TOKEN}",WANDB_API_KEY="${WANDB_API_KEY}" \
+    slurm/dataset-3d.slurm)
+
+echo "  ✅ Job submitted: ${JOB_ID}"
+echo ""
+echo "  Monitor:"
+echo "    squeue -u ${USER}"
+echo "    tail -f ${PROJECT_DIR}/dataset3d_${JOB_ID}.out"
