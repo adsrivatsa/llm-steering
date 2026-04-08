@@ -32,6 +32,28 @@ echo "  Output:      ${DATASET_DIR}/output"
 echo "  Checkpoints: ${DATASET_DIR}/checkpoints"
 echo "  HF cache:    ${SCRATCH}/hf_cache"
 
+# --- Environment Setup ---
+if [ ! -d ".venv" ]; then
+    echo "  Creating virtual environment (.venv)..."
+    module load python/3.12
+    python -m venv .venv
+fi
+
+echo "  Activating environment and installing dependencies..."
+source .venv/bin/activate
+pip install --upgrade pip
+
+# Check for the vllm wheel mentioned in pyproject.toml
+VLLM_WHEEL="vllm-0.18.0+cu126-cp312-cp312-linux_x86_64.whl"
+if [ ! -f "$VLLM_WHEEL" ]; then
+    echo "  ⚠️  WARNING: $VLLM_WHEEL not found. Installation may fail if required by pyproject.toml."
+    echo "     (Please upload the wheel or update pyproject.toml if vllm is needed)"
+fi
+
+# Install dependencies in editable mode
+# Note: This might fail if the wheel above is missing and required.
+pip install -e . || echo "  ⚠️  Warning: pip install -e . failed. You may need to install dependencies manually."
+
 echo ""
 echo "═══════════════════════════════════════════"
 echo "  3 · Submit SLURM job"
