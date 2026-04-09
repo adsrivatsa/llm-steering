@@ -160,12 +160,15 @@ def collect_pass_data(
         ckpt_path = os.path.join(checkpoint_dir, f"{pass_name}_ckpt.pt")
         if os.path.exists(ckpt_path):
             ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-            start_idx = int(ckpt["step"])
-            A = ckpt["A"]
-            N_counts = ckpt["N"]
-            if collect_hidden_states and "H_sum" in ckpt:
-                H_sum = ckpt["H_sum"]
-            print(f"[{pass_name}] Resuming from step {start_idx}")
+            if ckpt["A"].shape[-1] == n_tokens:
+                start_idx = int(ckpt["step"])
+                A = ckpt["A"]
+                N_counts = ckpt["N"]
+                if collect_hidden_states and "H_sum" in ckpt:
+                    H_sum = ckpt["H_sum"]
+                print(f"[{pass_name}] Resuming from step {start_idx}")
+            else:
+                print(f"[{pass_name}] Checkpoint n_tokens ({ckpt['A'].shape[-1]}) mismatch with current ({n_tokens}). Starting from scratch.")
 
     for idx in tqdm(
         range(start_idx, len(prompts)),
