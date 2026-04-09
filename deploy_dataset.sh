@@ -49,29 +49,28 @@ echo "  HF cache:    ${SCRATCH}/hf_cache"
 export TMPDIR="${SCRATCH}/tmp"
 mkdir -p "${TMPDIR}"
 
-if [ ! -d ".venv" ]; then
-    echo "  Creating virtual environment (.venv)..."
-    module load python/3.12
-    python -m venv .venv
+export PATH="$HOME/miniconda/bin:$PATH"
+
+ENV_NAME="llm_steering"
+if conda env list | grep -q "$ENV_NAME"; then
+    echo "  $ENV_NAME payload detected! Synchronizing missing packages..."
+    conda env update -f environment.yml --prune
+else
+    echo "  $ENV_NAME payload not found. Constructing fresh conda environment..."
+    conda env create -f environment.yml
 fi
 
-echo "  Activating environment and installing dependencies..."
-source .venv/bin/activate
-pip install --upgrade pip
+echo "  Activating conda environment $ENV_NAME..."
+source "$HOME/miniconda/etc/profile.d/conda.sh"
+conda activate $ENV_NAME
 
 # Check for the vllm wheel mentioned in pyproject.toml
 VLLM_WHEEL="vllm-0.18.0+cu126-cp312-cp312-linux_x86_64.whl"
 if [ ! -f "$VLLM_WHEEL" ]; then
-    echo "  ⚠️  WARNING: $VLLM_WHEEL not found. Installation may fail if required by pyproject.toml."
-    echo "     (Please upload the wheel or update pyproject.toml if vllm is needed)"
+    echo "  ⚠️  WARNING: $VLLM_WHEEL not found. Installation may fail if required."
 fi
 
-# Explicitly install core dependencies first to ensure they work even if -e . fails
-echo "  Installing core dependencies (torch, transformers, accelerate, datasets, tqdm)..."
-# Using --cache-dir to avoid /home1 space limits if needed
-pip install torch transformers accelerate datasets tqdm httpx --cache-dir "${SCRATCH}/.pip_cache"
-
-# Install remaining dependencies in editable mode
+# Install the project locally as well as vllm if available
 pip install -e . || echo "  ⚠️  Warning: pip install -e . failed. You may need to install vLLM manually."
 
 echo ""

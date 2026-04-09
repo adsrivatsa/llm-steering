@@ -15,7 +15,7 @@
 # ── Environment ───────────────────────────────────────────────────────────────
 set -e
 module purge
-module load gcc/13.3.0 python/3.12
+module load gcc/13.3.0
 
 export SCRATCH_DIR="/scratch1/kelidari"
 export HF_HOME="${SCRATCH_DIR}/hf_cache"
@@ -25,15 +25,10 @@ export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 
 cd "${SLURM_SUBMIT_DIR:-$HOME/llm-steering}"
 
-# ── Activate venv ─────────────────────────────────────────────────────────────
-if [ -f .venv/bin/activate ]; then
-    source .venv/bin/activate
-elif [ -f venv/bin/activate ]; then
-    source venv/bin/activate
-else
-    echo "❌ ERROR: Virtual environment not found. Please run 'uv sync' or create a venv."
-    exit 1
-fi
+# ── Activate Conda Environment ────────────────────────────────────────────────
+echo "Initializing Miniconda Core..."
+source "$HOME/miniconda/etc/profile.d/conda.sh"
+conda activate llm_steering
 
 # ── Run ───────────────────────────────────────────────────────────────────────
 echo "=== Starting dataset generation: $(date) ==="
