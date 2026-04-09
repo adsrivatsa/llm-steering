@@ -87,7 +87,7 @@ def main(
             "mquake": mquake.score,
         }
 
-    pattern = rf"{algorithm}_a(\d+)_d(\d+)"
+    pattern = rf"^{algorithm}_a(\d+)_d(\d+)"
 
     cum_heatmap = None
 
@@ -98,6 +98,8 @@ def main(
         path = os.path.join(inference_dir, model_name, benchmark_name)
         for file_name in os.listdir(path):
             match = re.search(pattern, file_name)
+            if not match:
+                continue
             n_activated, n_deactivated = int(match.group(1)), int(match.group(2))
             n_activateds.add(n_activated)
             n_deactivateds.add(n_deactivated)
