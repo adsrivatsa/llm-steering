@@ -66,7 +66,10 @@ conda activate $ENV_NAME
 
 # Check for the vllm wheel mentioned in pyproject.toml
 VLLM_WHEEL="vllm-0.18.0+cu126-cp312-cp312-linux_x86_64.whl"
-if [ ! -f "$VLLM_WHEEL" ]; then
+if [ -f "$VLLM_WHEEL" ]; then
+    echo "  Installing local vLLM wheel..."
+    pip install "$VLLM_WHEEL"
+else
     echo "  ⚠️  WARNING: $VLLM_WHEEL not found. Installation may fail if required."
 fi
 

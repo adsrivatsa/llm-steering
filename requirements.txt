@@ -52,6 +52,6 @@ transformers==4.57.6
 typer==0.24.1
 typing-extensions==4.15.0
 urllib3==2.6.3
-vllm==0.18.0
+
 xxhash==3.6.0
 yarl==1.23.0
