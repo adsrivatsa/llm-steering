@@ -26,7 +26,7 @@ cd "$(dirname "$0")/.."
 
 git add -A
 git diff --cached --quiet && echo "  Nothing to commit, skipping..." || \
-    git commit -m "Add 3D delta dataset generation pipeline"
+    git commit -m "Update 3D delta dataset generation pipeline"
 git push
 echo "  ✅ Pushed to remote"
 
@@ -49,6 +49,7 @@ echo "  Creating scratch dirs..."
 mkdir -p "${SCRATCH}/dataset_3d/output"
 mkdir -p "${SCRATCH}/dataset_3d/checkpoints"
 mkdir -p "${SCRATCH}/hf_cache"
+mkdir -p "${SCRATCH}/tmp"
 
 echo "  Submitting SLURM job..."
 JOB_ID=$(sbatch --parsable slurm/dataset-3d.slurm)
@@ -67,3 +68,4 @@ echo ""
 echo "  SSH in to monitor:"
 echo "    ssh ${CARC_USER}@${CARC_HOST}"
 echo "    squeue -u ${CARC_USER}"
+echo "    tail -f ~/llm-steering/dataset3d_<JOB_ID>.out"
