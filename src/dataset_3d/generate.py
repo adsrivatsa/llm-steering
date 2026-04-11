@@ -18,12 +18,27 @@ Usage:
 
 import argparse
 import os
+import time
 from collections import Counter
 
 import torch
 from datasets import load_dataset
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# ── Optional W&B ──────────────────────────────────────────────────────────────
+try:
+    import wandb
+    _WANDB_AVAILABLE = True
+except ImportError:
+    wandb = None
+    _WANDB_AVAILABLE = False
+
+
+def _wandb_log(data: dict, **kwargs):
+    """Log to wandb if available and initialized."""
+    if _WANDB_AVAILABLE and wandb.run is not None:
+        wandb.log(data, **kwargs)
 
 
 # ── Model Configurations ─────────────────────────────────────────────────────
@@ -224,13 +239,28 @@ def collect_pass_data(
 
             N_counts[t_idx] += 1
 
-        # Periodic checkpoint
+        # Periodic checkpoint + wandb logging
         if checkpoint_dir and (idx + 1) % checkpoint_interval == 0:
             _save_ckpt(checkpoint_dir, pass_name, idx + 1, A, N_counts, H_sum)
+            tokens_seen = (N_counts > 0).sum().item()
+            _wandb_log({
+                f"{pass_name}/step": idx + 1,
+                f"{pass_name}/progress_pct": (idx + 1) / len(prompts) * 100,
+                f"{pass_name}/unique_tokens_seen": tokens_seen,
+                f"{pass_name}/total_token_occurrences": N_counts.sum().item(),
+            })
 
     # Final checkpoint
     if checkpoint_dir:
         _save_ckpt(checkpoint_dir, pass_name, len(prompts), A, N_counts, H_sum)
+
+    # Log final pass stats
+    tokens_seen = (N_counts > 0).sum().item()
+    _wandb_log({
+        f"{pass_name}/final_unique_tokens": tokens_seen,
+        f"{pass_name}/final_total_occurrences": N_counts.sum().item(),
+        f"{pass_name}/completed": True,
+    })
 
     return H_sum, A, N_counts
 
@@ -331,6 +361,26 @@ def compute_and_save(
     print(f"  Total Y size: {y_bytes / 1e9:.2f} GB")
     print(f"  Total dataset: {(x_bytes + y_bytes) / 1e9:.2f} GB")
 
+    # Log final dataset stats to wandb
+    _wandb_log({
+        "dataset/n_valid_tokens": N_total,
+        "dataset/n_chunks": n_chunks,
+        "dataset/X_shape": f"({N_total}, {layers}, {experts}, {hidden_dim})",
+        "dataset/Y_shape": f"({N_total}, {layers}, {experts}, 1)",
+        "dataset/X_size_gb": x_bytes / 1e9,
+        "dataset/Y_size_gb": y_bytes / 1e9,
+        "dataset/total_size_gb": (x_bytes + y_bytes) / 1e9,
+        "dataset/X_nan_count": int(torch.isnan(X_base).sum().item()),
+        "dataset/Y_nan_count": int(torch.isnan(Y).sum().item()),
+        "dataset/Y_mean": Y.mean().item(),
+        "dataset/Y_std": Y.std().item(),
+        "dataset/Y_min": Y.min().item(),
+        "dataset/Y_max": Y.max().item(),
+        "dataset/Y_pct_positive": (Y > 0).float().mean().item() * 100,
+        "dataset/Y_pct_negative": (Y < 0).float().mean().item() * 100,
+        "dataset/Y_pct_zero": (Y == 0).float().mean().item() * 100,
+    })
+
     return X_base, Y
 
 
@@ -359,6 +409,30 @@ def generate(
 ):
     """End-to-end dataset generation."""
     hf_token = os.environ.get("HF_TOKEN")
+    t_start = time.time()
+
+    # ── Initialize W&B ────────────────────────────────────────────────────────
+    if _WANDB_AVAILABLE and os.environ.get("WANDB_API_KEY"):
+        wandb.init(
+            entity="VLAvengers",
+            project="tokenaware-steering-moe",
+            config={
+                "model_name": model_name,
+                "n_tokens": n_tokens,
+                "chunk_size": chunk_size,
+                "max_examples": max_examples,
+                "checkpoint_interval": checkpoint_interval,
+                "device": device,
+                "output_dir": output_dir,
+            },
+            tags=["dataset-generation", "3d-delta"],
+        )
+        print("✅ W&B run initialized")
+    else:
+        if not _WANDB_AVAILABLE:
+            print("⚠️  wandb not installed — logging disabled")
+        else:
+            print("⚠️  WANDB_API_KEY not set — logging disabled")
 
     print(f"Loading tokenizer: {model_name}")
     tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
@@ -378,6 +452,17 @@ def generate(
     layers, top_k, experts = MOE_EXPERT_CONFIG[model_name]
     print(f"Model config: L={layers}, K={top_k}, E={experts}")
 
+    # Log token selection info
+    _wandb_log({
+        "tokens/total_unique": freq_info["total_unique_tokens"],
+        "tokens/selected": freq_info["selected_tokens"],
+        "tokens/min_freq": freq_info["min_freq"],
+        "tokens/max_freq": freq_info["max_freq"],
+        "model/layers": layers,
+        "model/top_k": top_k,
+        "model/experts": experts,
+    })
+
     print(f"Loading model: {model_name}")
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
@@ -387,12 +472,15 @@ def generate(
         trust_remote_code=True,
     )
     model.eval()
-    print(f"  Hidden dim: {model.config.hidden_size}")
+    hidden_dim = model.config.hidden_size
+    print(f"  Hidden dim: {hidden_dim}")
+    _wandb_log({"model/hidden_dim": hidden_dim})
 
     prompts_x1, prompts_x2 = build_prompts(dataset)
 
     # Pass 1: x1 (doc + question) — hidden states + router activations
     print("\n=== Pass 1: x1 (document + question) ===")
+    t_pass1 = time.time()
     H1, A1, N1 = collect_pass_data(
         model, tokenizer, prompts_x1, tid2idx,
         layers, experts, top_k, device,
@@ -400,9 +488,12 @@ def generate(
         checkpoint_dir=checkpoint_dir,
         checkpoint_interval=checkpoint_interval,
     )
+    t_pass1_done = time.time()
+    _wandb_log({"timing/pass_x1_minutes": (t_pass1_done - t_pass1) / 60})
 
     # Pass 2: x2 (question only) — router activations only
     print("\n=== Pass 2: x2 (question only) ===")
+    t_pass2 = time.time()
     _, A2, N2 = collect_pass_data(
         model, tokenizer, prompts_x2, tid2idx,
         layers, experts, top_k, device,
@@ -410,6 +501,8 @@ def generate(
         checkpoint_dir=checkpoint_dir,
         checkpoint_interval=checkpoint_interval,
     )
+    t_pass2_done = time.time()
+    _wandb_log({"timing/pass_x2_minutes": (t_pass2_done - t_pass2) / 60})
 
     # Compute and save
     print("\n=== Computing X and Y ===")
@@ -418,6 +511,19 @@ def generate(
         tid2idx, idx2tid,
         model_name, output_dir, chunk_size,
     )
+
+    # Final timing
+    t_total = time.time() - t_start
+    _wandb_log({
+        "timing/total_minutes": t_total / 60,
+        "status": "completed",
+    })
+    print(f"\nTotal time: {t_total / 60:.1f} minutes")
+
+    # Finish W&B run
+    if _WANDB_AVAILABLE and wandb.run is not None:
+        wandb.finish()
+        print("✅ W&B run finished")
 
     return X, Y
 

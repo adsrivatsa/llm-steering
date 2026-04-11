@@ -20,6 +20,7 @@ module load gcc/13.3.0
 export SCRATCH_DIR="/scratch1/kelidari"
 export HF_HOME="${SCRATCH_DIR}/hf_cache"
 export HF_TOKEN="${HF_TOKEN}"
+export WANDB_API_KEY="${WANDB_API_KEY}"
 export TRANSFORMERS_CACHE="${SCRATCH_DIR}/hf_cache"
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 

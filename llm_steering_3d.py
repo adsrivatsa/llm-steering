@@ -16,7 +16,11 @@ import sys
 miniconda_path = f"{os.environ.get('HOME', '')}/miniconda/bin"
 os.environ["PATH"] = f"{miniconda_path}:" + os.environ.get("PATH", "")
 
+# W&B API key
+os.environ['WANDB_API_KEY'] = "MYtoken"
+
 print(f"Conda PATH securely bound to: {miniconda_path}")
+print("✓ W&B API key configured!")
 
 # %%
 import os
@@ -125,6 +129,7 @@ process = subprocess.Popen(
     stderr=subprocess.STDOUT,
     text=True,
     bufsize=1,
+    env={**os.environ},  # pass WANDB_API_KEY through
 )
 
 # Stream output in real-time
