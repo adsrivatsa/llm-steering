@@ -16,11 +16,17 @@ import sys
 miniconda_path = f"{os.environ.get('HOME', '')}/miniconda/bin"
 os.environ["PATH"] = f"{miniconda_path}:" + os.environ.get("PATH", "")
 
-# W&B API key
-os.environ['WANDB_API_KEY'] = "MYtoken"
+# Cache dirs → scratch to avoid home quota issues
+SCRATCH = os.environ.get("SCRATCH_DIR", "/scratch1/kelidari")
+os.environ["HF_HOME"] = os.path.join(SCRATCH, "hf_cache")
+os.environ["TRANSFORMERS_CACHE"] = os.path.join(SCRATCH, "hf_cache")
+os.environ["TMPDIR"] = os.path.join(SCRATCH, "tmp")
+os.makedirs(os.environ["HF_HOME"], exist_ok=True)
+os.makedirs(os.environ["TMPDIR"], exist_ok=True)
 
 print(f"Conda PATH securely bound to: {miniconda_path}")
-print("✓ W&B API key configured!")
+print(f"HF_HOME        = {os.environ['HF_HOME']}")
+print(f"TMPDIR         = {os.environ['TMPDIR']}")
 
 # %%
 import os
