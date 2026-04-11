@@ -413,9 +413,16 @@ def generate(
 
     # ── Initialize W&B ────────────────────────────────────────────────────────
     if _WANDB_AVAILABLE and os.environ.get("WANDB_API_KEY"):
+        # Build a descriptive run name
+        model_short = model_name.split("/")[-1]
+        tok_str = f"{n_tokens // 1000}k" if n_tokens else "all"
+        ex_str = f"-{max_examples}ex" if max_examples else ""
+        run_name = f"datagen-{model_short}-{tok_str}tok{ex_str}"
+
         wandb.init(
             entity="VLAvengers",
             project="tokenaware-steering-moe",
+            name=run_name,
             config={
                 "model_name": model_name,
                 "n_tokens": n_tokens,
