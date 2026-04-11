@@ -431,7 +431,7 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", type=str, default="dataset_3d_output")
     parser.add_argument("--checkpoint-dir", type=str, default="dataset_3d_ckpt")
     parser.add_argument("--n-tokens", type=int, default=None)
-    parser.add_argument("--chunk-size", type=int, default=200)
+    parser.add_argument("--chunk-size", type=int, default=2000)
     parser.add_argument("--max-examples", type=int, default=None)
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()

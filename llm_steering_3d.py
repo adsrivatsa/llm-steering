@@ -1,43 +1,61 @@
 # %% [markdown]
 # # 🚀 Token-Aware 3D Delta — Dataset Generation
 #
-# Generates X{N,L,E,D} and Y{N,L,E,1} tensors from SQuAD for learning Δ(E,L,D).
+# Generates **X{N,L,E,D}** and **Y{N,L,E,1}** tensors from SQuAD for learning Δ(E,L,D).
 #
-# **Run on CARC** via the companion `slurm/dataset-3d.slurm`, or cell-by-cell
-# in VS Code (the `# %%` markers are recognised as notebook cells).
+# All execution uses `conda run` to ensure the correct environment is active.
+# No manual `pip install` needed — everything runs inside the `llm_steering` conda env.
 
 # %% [markdown]
 # ## 1 · Environment Setup
 
 # %%
-import os, sys, subprocess
+import os
+import sys
 
-# HuggingFace token — set yours here or via env
-if "HF_TOKEN" not in os.environ:
-    os.environ["HF_TOKEN"] = ""  # <-- paste token if needed
+miniconda_path = f"{os.environ.get('HOME', '')}/miniconda/bin"
+os.environ["PATH"] = f"{miniconda_path}:" + os.environ.get("PATH", "")
 
-# Cache dirs (use scratch on CARC to avoid quota issues)
-SCRATCH = os.environ.get("SCRATCH_DIR", os.path.expanduser("~/scratch1/kelidari"))
-os.environ["HF_HOME"] = os.path.join(SCRATCH, "hf_cache")
-os.environ["TRANSFORMERS_CACHE"] = os.path.join(SCRATCH, "hf_cache")
-os.makedirs(os.environ["HF_HOME"], exist_ok=True)
+print(f"Conda PATH securely bound to: {miniconda_path}")
 
-print(f"HF_HOME       = {os.environ['HF_HOME']}")
-print(f"SCRATCH       = {SCRATCH}")
-print(f"Python        = {sys.executable}")
+# %%
+import os
+
+# Preemptively accept Conda TOS to prevent hanging prompts
+# !conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main 2>/dev/null || true
+# !conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r 2>/dev/null || true
+
+# Intelligently handle environment creation or update
+env_name = "llm_steering"
+print("Checking environment status...")
+res = os.system(f"conda env list | grep {env_name} > /dev/null")
+if res == 0:
+    print(f"{env_name} exists! Synchronizing any missing packages ...")
+    os.system("conda env update -f environment.yml --prune")
+else:
+    print(f"{env_name} does not exist. Creating fresh environment...")
+    os.system("conda env create -f environment.yml")
+
+# %%
+# Install project in editable mode inside the conda env
+os.system("conda run -n llm_steering pip install -e . 2>&1 | tail -5")
+print("✅ Project installed in conda env")
 
 # %% [markdown]
 # ## 2 · Configuration
 
 # %%
+import os
+
 # ── Configurable parameters ──────────────────────────────────────────────────
 MODEL_NAME     = "allenai/OLMoE-1B-7B-0125-Instruct"
-N_TOKENS       = 20_000        # middle-frequency tokens to select
-CHUNK_SIZE     = 2000           # tokens per saved chunk file (each chunk is ~1.7 GB with E=64)
-MAX_EXAMPLES   = None          # set to e.g. 500 for a quick debug run
-CKPT_INTERVAL  = 500           # save checkpoint every N examples
+N_TOKENS       = 20_000        # middle-frequency tokens to select (None = all)
+CHUNK_SIZE     = 2000           # tokens per saved chunk file
+MAX_EXAMPLES   = None           # set to e.g. 500 for a quick debug run
 DEVICE         = "cuda"
 
+# Scratch directories
+SCRATCH = os.environ.get("SCRATCH_DIR", os.path.expanduser("~/scratch1/kelidari"))
 OUTPUT_DIR     = os.path.join(SCRATCH, "dataset_3d", "output")
 CHECKPOINT_DIR = os.path.join(SCRATCH, "dataset_3d", "checkpoints")
 
@@ -48,183 +66,137 @@ print(f"Model          = {MODEL_NAME}")
 print(f"Output dir     = {OUTPUT_DIR}")
 print(f"Checkpoint dir = {CHECKPOINT_DIR}")
 print(f"N tokens       = {N_TOKENS}")
+print(f"Chunk size     = {CHUNK_SIZE}")
 print(f"Max examples   = {MAX_EXAMPLES or 'all (~87K)'}")
 
 # %% [markdown]
-# ## 3 · Imports
+# ## 3 · Estimated Disk & RAM Usage
 
 # %%
-import torch
-from datasets import load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from tqdm import tqdm
+# Quick size estimate before running
+L, K, E = 16, 8, 64    # OLMoE config
+D = 2048                # hidden dim
+N = N_TOKENS or 50000   # approximate if using all tokens
 
-# Import our module
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) if "__file__" in dir() else ".")
-from src.dataset_3d.generate import (
-    MOE_EXPERT_CONFIG,
-    load_squad,
-    select_middle_tokens,
-    build_prompts,
-    collect_pass_data,
-    compute_and_save,
-)
+h_ram  = N * L * D * 4 / 1e9
+a_ram  = L * E * N * 4 / 1e9
+x_disk = N * L * E * D * 4 / 1e9
+y_disk = N * L * E * 4 / 1e9
 
-print(f"torch  = {torch.__version__}")
-print(f"CUDA   = {torch.cuda.is_available()}")
-if torch.cuda.is_available():
-    print(f"GPU    = {torch.cuda.get_device_name(0)}")
-    print(f"VRAM   = {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
-
-# %% [markdown]
-# ## 4 · Load Dataset & Select Tokens
-
-# %%
-dataset = load_squad()
-if MAX_EXAMPLES:
-    dataset = dataset.select(range(min(MAX_EXAMPLES, len(dataset))))
-print(f"SQuAD examples: {len(dataset)}")
-
-# %%
-hf_token = os.environ.get("HF_TOKEN")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, token=hf_token)
-
-selected_set, tid2idx, idx2tid, freq_info = select_middle_tokens(
-    dataset, tokenizer, N_TOKENS
-)
-print(f"Token selection: {freq_info}")
-
-# %%
-# Build prompts
-prompts_x1, prompts_x2 = build_prompts(dataset)
-print(f"Prompts built: {len(prompts_x1)} x1, {len(prompts_x2)} x2")
-
-# Estimate RAM for accumulators
-layers, top_k, experts = MOE_EXPERT_CONFIG[MODEL_NAME]
-hidden_dim = 2048  # OLMoE hidden size
-n_sel = len(tid2idx)
-h_ram = n_sel * layers * hidden_dim * 4 / 1e9
-a_ram = layers * experts * n_sel * 4 / 1e9
-x_disk = n_sel * layers * experts * hidden_dim * 4 / 1e9
-y_disk = n_sel * layers * experts * 4 / 1e9
-print(f"\nModel config: L={layers}, K={top_k}, E={experts}, D={hidden_dim}")
-print(f"RAM estimate (accumulators):")
+print(f"Model config: L={L}, K={K}, E={E}, D={D}, N≈{N}")
+print(f"\nRAM estimate (accumulators in memory during collection):")
 print(f"  H_sum:  {h_ram:.2f} GB  (N, L, D)")
-print(f"  A1/A2:  {a_ram:.2f} GB each")
+print(f"  A1/A2:  {a_ram:.2f} GB each  (L, E, N)")
 print(f"  Total:  {h_ram + 2*a_ram:.2f} GB")
-print(f"Disk estimate (saved dataset):")
+print(f"\nDisk estimate (saved dataset):")
 print(f"  X:      {x_disk:.2f} GB  (N, L, E, D)")
 print(f"  Y:      {y_disk:.2f} GB  (N, L, E, 1)")
 print(f"  Total:  {x_disk + y_disk:.2f} GB")
 
 # %% [markdown]
-# ## 5 · Load Model
-
-# %%
-print(f"Loading model: {MODEL_NAME}")
-model = AutoModelForCausalLM.from_pretrained(
-    MODEL_NAME,
-    torch_dtype=torch.float16,
-    device_map="auto",
-    token=hf_token,
-    trust_remote_code=True,
-)
-model.eval()
-print(f"Hidden dim: {model.config.hidden_size}")
-print(f"Model loaded on: {next(model.parameters()).device}")
-
-# %% [markdown]
-# ## 6 · Pass 1 — x1 (Document + Question)
+# ## 4 · Run Dataset Generation
 #
-# Collects **hidden states** (for X) and **router activations** (for Y).
-# This is the slowest step. Checkpoints save every `CKPT_INTERVAL` examples.
+# Runs the full pipeline (2 passes through the model + save) inside the conda env.
+# This is the long-running step — checkpoints are saved every 500 examples.
 
 # %%
-H1, A1, N1 = collect_pass_data(
-    model, tokenizer, prompts_x1, tid2idx,
-    layers, experts, top_k, DEVICE,
-    pass_name="x1",
-    collect_hidden_states=True,
-    checkpoint_dir=CHECKPOINT_DIR,
-    checkpoint_interval=CKPT_INTERVAL,
+import subprocess
+
+cmd_parts = [
+    "conda", "run", "-n", "llm_steering", "python", "-u", "-m", "src.dataset_3d.generate",
+    "--model", MODEL_NAME,
+    "--output-dir", OUTPUT_DIR,
+    "--checkpoint-dir", CHECKPOINT_DIR,
+    "--chunk-size", str(CHUNK_SIZE),
+    "--device", DEVICE,
+]
+
+if N_TOKENS is not None:
+    cmd_parts.extend(["--n-tokens", str(N_TOKENS)])
+if MAX_EXAMPLES is not None:
+    cmd_parts.extend(["--max-examples", str(MAX_EXAMPLES)])
+
+print("Command:", " ".join(cmd_parts))
+print("=" * 60)
+
+process = subprocess.Popen(
+    cmd_parts,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    text=True,
+    bufsize=1,
 )
-print(f"Pass x1 done. Tokens with ≥1 occurrence: {(N1 > 0).sum().item()}")
+
+# Stream output in real-time
+for line in iter(process.stdout.readline, ""):
+    print(line, end="")
+
+process.wait()
+print("\n" + "=" * 60)
+print(f"Exit code: {process.returncode}")
+if process.returncode == 0:
+    print("✅ Dataset generation complete!")
+else:
+    print("❌ Dataset generation FAILED — check output above")
 
 # %% [markdown]
-# ## 7 · Pass 2 — x2 (Question Only)
+# ## 5 · Verification & Statistics
 #
-# Collects **router activations only** (no hidden states needed).
+# Verify the saved chunks have the correct shapes: **X(N,L,E,D)** and **Y(N,L,E,1)**.
 
 # %%
-_, A2, N2 = collect_pass_data(
-    model, tokenizer, prompts_x2, tid2idx,
-    layers, experts, top_k, DEVICE,
-    pass_name="x2",
-    collect_hidden_states=False,
-    checkpoint_dir=CHECKPOINT_DIR,
-    checkpoint_interval=CKPT_INTERVAL,
-)
-print(f"Pass x2 done. Tokens with ≥1 occurrence: {(N2 > 0).sum().item()}")
+# Write verification script
+verify_code = '''
+import os, sys, glob, torch
 
-# %% [markdown]
-# ## 8 · Compute X and Y & Save
+OUTPUT_DIR = sys.argv[1]
 
-# %%
-X_base, Y = compute_and_save(
-    H1, A1, N1, A2, N2,
-    tid2idx, idx2tid,
-    MODEL_NAME, OUTPUT_DIR, CHUNK_SIZE,
-)
-
-# %% [markdown]
-# ## 9 · Verification & Statistics
-
-# %%
 print("=" * 60)
 print("VERIFICATION")
 print("=" * 60)
-print(f"X_base shape: {X_base.shape}  (N, L, D) — in memory")
-print(f"Y shape:      {Y.shape}  (N, L, E, 1)")
-print(f"X_base dtype: {X_base.dtype}")
-print(f"Y dtype:      {Y.dtype}")
-print()
 
-# Check for NaNs
-print(f"X_base NaN count: {torch.isnan(X_base).sum().item()}")
-print(f"Y NaN count:      {torch.isnan(Y).sum().item()}")
+meta_path = os.path.join(OUTPUT_DIR, "metadata.pt")
+if not os.path.exists(meta_path):
+    print("No metadata.pt found")
+    sys.exit(1)
 
-# Y distribution
-print(f"\nY statistics:")
-print(f"  mean:    {Y.mean().item():.6f}")
-print(f"  std:     {Y.std().item():.6f}")
-print(f"  min:     {Y.min().item():.6f}")
-print(f"  max:     {Y.max().item():.6f}")
-print(f"  % > 0:   {(Y > 0).float().mean().item() * 100:.1f}%")
-print(f"  % < 0:   {(Y < 0).float().mean().item() * 100:.1f}%")
-print(f"  % == 0:  {(Y == 0).float().mean().item() * 100:.1f}%")
+meta = torch.load(meta_path, map_location="cpu", weights_only=False)
+print(f"Model:      {meta['model_name']}")
+print(f"N total:    {meta['n_total']}")
+print(f"Layers:     {meta['layers']}")
+print(f"Experts:    {meta['experts']}")
+print(f"Hidden dim: {meta['hidden_dim']}")
 
-# X norm per layer
-print(f"\nX_base L2 norm per layer (averaged over tokens):")
-for l in range(X_base.shape[1]):
-    norm = X_base[:, l, :].norm(dim=-1).mean().item()
-    print(f"  Layer {l:2d}: {norm:.2f}")
+chunk_files = sorted(glob.glob(os.path.join(OUTPUT_DIR, "chunk_*.pt")))
+print(f"Chunk files: {len(chunk_files)}")
+
+first = torch.load(chunk_files[0], map_location="cpu", weights_only=True)
+X, Y = first["X"], first["Y"]
+print(f"X shape: {X.shape}")
+print(f"Y shape: {Y.shape}")
+
+assert X.dim() == 4, f"X should be 4D, got {X.dim()}D"
+assert X.shape[2] == meta["experts"]
+print(f"X is (N, L={meta['layers']}, E={meta['experts']}, D={meta['hidden_dim']})")
+
+total_bytes = sum(os.path.getsize(f) for f in chunk_files) + os.path.getsize(meta_path)
+print(f"Total dataset size: {total_bytes / 1e9:.2f} GB")
+print("All checks passed!")
+'''
+
+with open("_verify_dataset.py", "w") as f:
+    f.write(verify_code)
+
+subprocess.run(
+    ["conda", "run", "-n", "llm_steering", "python", "-u", "_verify_dataset.py", OUTPUT_DIR],
+    capture_output=False, text=True,
+)
 
 # %%
-# Verify chunks are loadable
-import glob
-chunk_files = sorted(glob.glob(os.path.join(OUTPUT_DIR, "chunk_*.pt")))
-meta = torch.load(os.path.join(OUTPUT_DIR, "metadata.pt"), map_location="cpu", weights_only=False)
-print(f"\nChunk files: {len(chunk_files)}")
-print(f"Metadata keys: {list(meta.keys())}")
-
-# Load first chunk and verify X is (chunk, L, E, D)
-first_chunk = torch.load(chunk_files[0], map_location="cpu", weights_only=True)
-print(f"\nFirst chunk (on disk):")
-print(f"  X: {first_chunk['X'].shape}  (chunk, L, E, D) ✅")
-print(f"  Y: {first_chunk['Y'].shape}  (chunk, L, E, 1)")
-
-# Verify X has the expert dimension
-assert first_chunk['X'].dim() == 4, f"X should be 4D (N,L,E,D), got {first_chunk['X'].dim()}D"
-assert first_chunk['X'].shape[2] == experts, f"X dim 2 should be E={experts}, got {first_chunk['X'].shape[2]}"
-print()
-print("✅ Dataset generation complete! X is (N, L, E, D).")
+# Cleanup temp scripts
+import os
+for f in ["_verify_dataset.py", "_explore_dataset.py"]:
+    if os.path.exists(f):
+        os.remove(f)
+        print(f"Removed {f}")
+print("✅ Done")
