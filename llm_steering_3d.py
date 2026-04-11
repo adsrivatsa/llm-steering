@@ -1,7 +1,7 @@
 # %% [markdown]
 # # 🚀 Token-Aware 3D Delta — Dataset Generation
 #
-# Generates X{N,L,D} and Y{N,L,E,1} tensors from SQuAD for learning Δ(E,L,D).
+# Generates X{N,L,E,D} and Y{N,L,E,1} tensors from SQuAD for learning Δ(E,L,D).
 #
 # **Run on CARC** via the companion `slurm/dataset-3d.slurm`, or cell-by-cell
 # in VS Code (the `# %%` markers are recognised as notebook cells).
@@ -33,7 +33,7 @@ print(f"Python        = {sys.executable}")
 # ── Configurable parameters ──────────────────────────────────────────────────
 MODEL_NAME     = "allenai/OLMoE-1B-7B-0125-Instruct"
 N_TOKENS       = 20_000        # middle-frequency tokens to select
-CHUNK_SIZE     = 2_000         # tokens per saved chunk file
+CHUNK_SIZE     = 2000           # tokens per saved chunk file (each chunk is ~1.7 GB with E=64)
 MAX_EXAMPLES   = None          # set to e.g. 500 for a quick debug run
 CKPT_INTERVAL  = 500           # save checkpoint every N examples
 DEVICE         = "cuda"
@@ -105,11 +105,17 @@ hidden_dim = 2048  # OLMoE hidden size
 n_sel = len(tid2idx)
 h_ram = n_sel * layers * hidden_dim * 4 / 1e9
 a_ram = layers * experts * n_sel * 4 / 1e9
+x_disk = n_sel * layers * experts * hidden_dim * 4 / 1e9
+y_disk = n_sel * layers * experts * 4 / 1e9
 print(f"\nModel config: L={layers}, K={top_k}, E={experts}, D={hidden_dim}")
 print(f"RAM estimate (accumulators):")
-print(f"  H_sum:  {h_ram:.2f} GB")
+print(f"  H_sum:  {h_ram:.2f} GB  (N, L, D)")
 print(f"  A1/A2:  {a_ram:.2f} GB each")
 print(f"  Total:  {h_ram + 2*a_ram:.2f} GB")
+print(f"Disk estimate (saved dataset):")
+print(f"  X:      {x_disk:.2f} GB  (N, L, E, D)")
+print(f"  Y:      {y_disk:.2f} GB  (N, L, E, 1)")
+print(f"  Total:  {x_disk + y_disk:.2f} GB")
 
 # %% [markdown]
 # ## 5 · Load Model
@@ -164,7 +170,7 @@ print(f"Pass x2 done. Tokens with ≥1 occurrence: {(N2 > 0).sum().item()}")
 # ## 8 · Compute X and Y & Save
 
 # %%
-X, Y = compute_and_save(
+X_base, Y = compute_and_save(
     H1, A1, N1, A2, N2,
     tid2idx, idx2tid,
     MODEL_NAME, OUTPUT_DIR, CHUNK_SIZE,
@@ -177,15 +183,15 @@ X, Y = compute_and_save(
 print("=" * 60)
 print("VERIFICATION")
 print("=" * 60)
-print(f"X shape: {X.shape}  (N, L, D)")
-print(f"Y shape: {Y.shape}  (N, L, E, 1)")
-print(f"X dtype: {X.dtype}")
-print(f"Y dtype: {Y.dtype}")
+print(f"X_base shape: {X_base.shape}  (N, L, D) — in memory")
+print(f"Y shape:      {Y.shape}  (N, L, E, 1)")
+print(f"X_base dtype: {X_base.dtype}")
+print(f"Y dtype:      {Y.dtype}")
 print()
 
 # Check for NaNs
-print(f"X NaN count: {torch.isnan(X).sum().item()}")
-print(f"Y NaN count: {torch.isnan(Y).sum().item()}")
+print(f"X_base NaN count: {torch.isnan(X_base).sum().item()}")
+print(f"Y NaN count:      {torch.isnan(Y).sum().item()}")
 
 # Y distribution
 print(f"\nY statistics:")
@@ -198,9 +204,9 @@ print(f"  % < 0:   {(Y < 0).float().mean().item() * 100:.1f}%")
 print(f"  % == 0:  {(Y == 0).float().mean().item() * 100:.1f}%")
 
 # X norm per layer
-print(f"\nX L2 norm per layer (averaged over tokens):")
-for l in range(X.shape[1]):
-    norm = X[:, l, :].norm(dim=-1).mean().item()
+print(f"\nX_base L2 norm per layer (averaged over tokens):")
+for l in range(X_base.shape[1]):
+    norm = X_base[:, l, :].norm(dim=-1).mean().item()
     print(f"  Layer {l:2d}: {norm:.2f}")
 
 # %%
@@ -211,14 +217,14 @@ meta = torch.load(os.path.join(OUTPUT_DIR, "metadata.pt"), map_location="cpu", w
 print(f"\nChunk files: {len(chunk_files)}")
 print(f"Metadata keys: {list(meta.keys())}")
 
-# Load first chunk and verify
+# Load first chunk and verify X is (chunk, L, E, D)
 first_chunk = torch.load(chunk_files[0], map_location="cpu", weights_only=True)
-print(f"\nFirst chunk:")
-print(f"  X: {first_chunk['X'].shape}")
-print(f"  Y: {first_chunk['Y'].shape}")
+print(f"\nFirst chunk (on disk):")
+print(f"  X: {first_chunk['X'].shape}  (chunk, L, E, D) ✅")
+print(f"  Y: {first_chunk['Y'].shape}  (chunk, L, E, 1)")
 
-# Show how to expand X to (N, L, E, D) at training time
-X_expanded = first_chunk["X"].unsqueeze(2).expand(-1, -1, experts, -1)
-print(f"  X expanded: {X_expanded.shape}  (N, L, E, D)")
+# Verify X has the expert dimension
+assert first_chunk['X'].dim() == 4, f"X should be 4D (N,L,E,D), got {first_chunk['X'].dim()}D"
+assert first_chunk['X'].shape[2] == experts, f"X dim 2 should be E={experts}, got {first_chunk['X'].shape[2]}"
 print()
-print("✅ Dataset generation complete!")
+print("✅ Dataset generation complete! X is (N, L, E, D).")

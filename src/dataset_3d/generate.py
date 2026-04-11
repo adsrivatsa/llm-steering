@@ -2,15 +2,13 @@
 Dataset generation for learning the 3D delta Δ(E, L, D).
 
 Produces:
-  X: (N, L, D)     — averaged hidden states per token per layer
+  X: (N, L, E, D)  — averaged hidden states per token per layer, broadcast across experts
   Y: (N, L, E, 1)  — expert activation risk difference (classification target)
 
 N = number of selected tokens (all by default, or middle N by frequency)
 L = number of transformer layers
 E = number of experts per layer
 D = hidden state dimension
-
-At training time, X is broadcast to E experts: X[:, :, None, :].expand(N, L, E, D)
 
 Usage:
   python -m src.dataset_3d.generate \\
@@ -265,8 +263,11 @@ def compute_and_save(
 ):
     """Compute X and Y from accumulated data and save in chunks.
 
-    X stored as (chunk, L, D) — expand to E at training time.
+    X stored as (chunk, L, E, D) — hidden states broadcast across all experts.
     Y stored as (chunk, L, E, 1).
+
+    Returns X_base (N, L, D) and Y (N, L, E, 1) in memory.
+    The full (N, L, E, D) expansion is done chunk-by-chunk to avoid RAM blow-up.
     """
     # Filter to tokens present in both passes
     valid = (N1 > 0) & (N2 > 0)
@@ -276,8 +277,8 @@ def compute_and_save(
     N1_safe = N1[valid_indices].float().clamp(min=1)
     N2_safe = N2[valid_indices].float().clamp(min=1)
 
-    # X: averaged hidden states from x1 pass  — shape (N_valid, L, D)
-    X = H1_sum[valid_indices] / N1_safe.unsqueeze(1).unsqueeze(2)
+    # X_base: averaged hidden states from x1 pass — shape (N_valid, L, D)
+    X_base = H1_sum[valid_indices] / N1_safe.unsqueeze(1).unsqueeze(2)
 
     # Y: risk difference — shape (N_valid, L, E, 1)
     #   p1[l, e, n] = A1[l, e, n] / N1[n]
@@ -286,22 +287,24 @@ def compute_and_save(
     p2 = A2[:, :, valid_indices] / N2_safe.unsqueeze(0).unsqueeze(0)
     Y = (p1 - p2).permute(2, 0, 1).unsqueeze(-1)  # (N_valid, L, E, 1)
 
-    # Save chunks
+    # Save chunks — X expanded to (chunk, L, E, D) per chunk
     os.makedirs(output_dir, exist_ok=True)
-    N_total = X.shape[0]
+    layers, experts = A1.shape[0], A1.shape[1]
+    hidden_dim = X_base.shape[2]
+    N_total = X_base.shape[0]
     n_chunks = 0
 
     for i in range(0, N_total, chunk_size):
         end = min(i + chunk_size, N_total)
+        # Expand X_base (chunk, L, D) → (chunk, L, E, D)
+        X_chunk = X_base[i:end].unsqueeze(2).expand(-1, -1, experts, -1).clone()
         torch.save(
-            {"X": X[i:end], "Y": Y[i:end]},
+            {"X": X_chunk, "Y": Y[i:end]},
             os.path.join(output_dir, f"chunk_{n_chunks:04d}.pt"),
         )
         n_chunks += 1
 
     # Save metadata
-    layers, experts = A1.shape[0], A1.shape[1]
-    hidden_dim = X.shape[2]
     meta = {
         "model_name": model_name,
         "layers": layers,
@@ -318,16 +321,17 @@ def compute_and_save(
     }
     torch.save(meta, os.path.join(output_dir, "metadata.pt"))
     print(f"Saved {n_chunks} chunks to {output_dir}")
-    print(f"  X shape per chunk: (≤{chunk_size}, {layers}, {hidden_dim})")
+    print(f"  X shape per chunk: (≤{chunk_size}, {layers}, {experts}, {hidden_dim})")
     print(f"  Y shape per chunk: (≤{chunk_size}, {layers}, {experts}, 1)")
 
-    # RAM estimate
-    x_bytes = N_total * layers * hidden_dim * 4
+    # Disk size estimate
+    x_bytes = N_total * layers * experts * hidden_dim * 4
     y_bytes = N_total * layers * experts * 4
     print(f"  Total X size: {x_bytes / 1e9:.2f} GB")
     print(f"  Total Y size: {y_bytes / 1e9:.2f} GB")
+    print(f"  Total dataset: {(x_bytes + y_bytes) / 1e9:.2f} GB")
 
-    return X, Y
+    return X_base, Y
 
 
 # ── Main Entry ────────────────────────────────────────────────────────────────
@@ -427,7 +431,7 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", type=str, default="dataset_3d_output")
     parser.add_argument("--checkpoint-dir", type=str, default="dataset_3d_ckpt")
     parser.add_argument("--n-tokens", type=int, default=None)
-    parser.add_argument("--chunk-size", type=int, default=2000)
+    parser.add_argument("--chunk-size", type=int, default=200)
     parser.add_argument("--max-examples", type=int, default=None)
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
