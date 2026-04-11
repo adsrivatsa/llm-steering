@@ -74,7 +74,7 @@ else
 fi
 
 # Install the project locally as well as vllm if available
-pip install -e . || echo "  ⚠️  Warning: pip install -e . failed. You may need to install vLLM manually."
+# pip install -e . || echo "  ⚠️  Warning: pip install -e . failed. You may need to install vLLM manually."
 
 echo ""
 echo "═══════════════════════════════════════════"
