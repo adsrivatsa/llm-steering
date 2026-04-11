@@ -13,7 +13,6 @@ from src.benchmark import (
     faitheval_counterfactual,
     faitheval_inconsistent,
     faitheval_unanswerable,
-    mctest,
     mquake,
 )
 
@@ -83,7 +82,6 @@ def main(
             "faitheval_counterfactual": faitheval_counterfactual.score,
             "faitheval_inconsistent": faitheval_inconsistent.score,
             "faitheval_unanswerable": faitheval_unanswerable.score,
-            "mctest": mctest.score,
             "mquake": mquake.score,
         }
 
@@ -147,7 +145,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
-        "--algorithm", type=str, choices=["steermoe", "toksteermoe"], default="steermoe"
+        "--algorithm",
+        type=str,
+        choices=["steermoe", "toksteermoe"],
+        default="toksteermoe",
     )
     parser.add_argument(
         "--task", type=str, choices=["faithfulness"], default="faithfulness"
