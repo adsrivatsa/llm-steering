@@ -13,6 +13,7 @@ from src.benchmark import (
     faitheval_counterfactual,
     faitheval_inconsistent,
     faitheval_unanswerable,
+    mctest,
     mquake,
 )
 
@@ -83,6 +84,7 @@ def main(
             "faitheval_inconsistent": faitheval_inconsistent.score,
             "faitheval_unanswerable": faitheval_unanswerable.score,
             "mquake": mquake.score,
+            "mctest": mctest.score,
         }
 
     pattern = rf"^{algorithm}_a(\d+)_d(\d+)"
@@ -116,7 +118,8 @@ def main(
         for i, act in enumerate(act_labels):
             for j, deact in enumerate(deact_labels):
                 heatmap[i][j] = scores[(act, deact)]
-                cum_heatmap[i][j] += scores[(act, deact)]
+                if benchmark_name != "mctest":
+                    cum_heatmap[i][j] += scores[(act, deact)]
 
         heatmap = np.asarray(heatmap, dtype=np.float64)[::-1, :]
         save_heatmap(
@@ -129,7 +132,9 @@ def main(
             deact_labels=deact_labels,
         )
 
-    cum_heatmap = np.array(cum_heatmap, dtype=np.float64)[::-1, :] / len(benchmarks)
+    cum_heatmap = np.array(cum_heatmap, dtype=np.float64)[::-1, :] / (
+        len(benchmarks) - 1  # not including mctest
+    )
     save_heatmap(
         model_name=model_name,
         algorithm=algorithm,
