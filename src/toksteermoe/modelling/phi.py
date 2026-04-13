@@ -316,15 +316,17 @@ class PhiMoE(nn.Module):
 
         s_max = router_logits.max(dim=-1).values.unsqueeze(-1)  # (T, 1)
         s_min = router_logits.min(dim=-1).values.unsqueeze(-1)  # (T, 1)
-        pos_mask = moe_manual_weights > 0  # (T)
-        neg_mask = moe_manual_weights < 0  # (T)
+        pos_mask = moe_manual_weights > 0  # (T, experts)
+        neg_mask = moe_manual_weights < 0  # (T, experts)
 
-        router_logits = torch.where(
-            pos_mask, s_max + eps, router_logits
-        )  # (T, experts)
-        router_logits = torch.where(
-            neg_mask, s_min - eps, router_logits
-        )  # (T, experts)
+        # Optimized steering: avoid torch.where for better performance
+        # Boost positive experts to max + eps
+        boost_mask = pos_mask.float()  # (T, experts)
+        router_logits = router_logits * (1 - boost_mask) + (s_max + eps) * boost_mask
+        
+        # Suppress negative experts to min - eps  
+        suppress_mask = neg_mask.float()  # (T, experts)
+        router_logits = router_logits * (1 - suppress_mask) + (s_min - eps) * suppress_mask
 
         # * Added
 
