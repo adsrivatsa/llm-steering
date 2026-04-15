@@ -34,17 +34,10 @@ mkdir -p "${SCRATCH_DIR}/dataset_3d/checkpoints"
 cd "${SLURM_SUBMIT_DIR:-$HOME/llm-steering}"
 
 # ── Activate Conda ────────────────────────────────────────────────────────────
-# ── Activate Conda ────────────────────────────────────────────────────────────
-# ── Activate Conda ────────────────────────────────────────────────────────────
-CONDA_DIR="$HOME/miniconda"
-export PATH="$CONDA_DIR/bin:$PATH"
-
-if [ -f "$CONDA_DIR/etc/profile.d/conda.sh" ]; then
-    source "$CONDA_DIR/etc/profile.d/conda.sh"
-else
-    echo "  ❌ ERROR: Conda not found at $CONDA_DIR"
-    exit 1
-fi
+export PATH="$HOME/miniconda/bin:$PATH"
+source "$HOME/miniconda/etc/profile.d/conda.sh"
+conda activate llm_steering
+echo "  ✅ Conda environment llm_steering active"
 
 # ── Parameters (must match notebook Section 2 · Configuration) ────────────────
 MODEL_NAME="allenai/OLMoE-1B-7B-0125-Instruct"
@@ -67,7 +60,7 @@ echo "HF_HOME:    ${HF_HOME}"
 echo "TMPDIR:     ${TMPDIR}"
 
 echo "=== Torch/CUDA preflight ==="
-conda run --no-capture-output -n llm_steering python -u -c "
+python -u -c "
 import os
 import torch
 
@@ -83,7 +76,7 @@ if not torch.cuda.is_available():
     )
 "
 
-conda run --no-capture-output -n llm_steering python -u -m src.dataset_3d.generate \
+python -u -m src.dataset_3d.generate \
     --model "${MODEL_NAME}" \
     --output-dir "${OUTPUT_DIR}" \
     --checkpoint-dir "${CHECKPOINT_DIR}" \
