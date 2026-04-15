@@ -42,6 +42,7 @@ mkdir -p "${DATASET_DIR}/output"
 mkdir -p "${DATASET_DIR}/checkpoints"
 mkdir -p "${SCRATCH}/hf_cache"
 echo "  Output:      ${DATASET_DIR}/output"
+echo "  Final file:  ${DATASET_DIR}/output/dataset.pt"
 echo "  Checkpoints: ${DATASET_DIR}/checkpoints"
 echo "  HF cache:    ${SCRATCH}/hf_cache"
 

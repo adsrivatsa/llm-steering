@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --mem=64GB
 #SBATCH --gpus-per-task=1
 #SBATCH --constraint=v100
 #SBATCH --time=24:00:00
@@ -41,19 +41,21 @@ conda activate llm_steering
 
 # ── Parameters (must match notebook Section 2 · Configuration) ────────────────
 MODEL_NAME="allenai/OLMoE-1B-7B-0125-Instruct"
-CHUNK_SIZE=2000
 DEVICE="cuda"
+STORAGE_DTYPE="float16"
+CHECKPOINT_INTERVAL=100
 OUTPUT_DIR="${SCRATCH_DIR}/dataset_3d/output"
 CHECKPOINT_DIR="${SCRATCH_DIR}/dataset_3d/checkpoints"
-# N_TOKENS: not passed → defaults to None (all tokens), matching notebook
 
 # ── Run ───────────────────────────────────────────────────────────────────────
 echo "=== Starting dataset generation: $(date) ==="
 echo "GPU:        $(nvidia-smi --query-gpu=name --format=csv,noheader)"
 echo "Model:      ${MODEL_NAME}"
 echo "Output:     ${OUTPUT_DIR}"
+echo "Output file:${OUTPUT_DIR}/dataset.pt"
 echo "Checkpoint: ${CHECKPOINT_DIR}"
-echo "Chunk size: ${CHUNK_SIZE}"
+echo "Dataset row schema: S x L rows with D(hidden), y1(x1 expert probs), y2(x2 expert probs)"
+echo "Storage:    ${STORAGE_DTYPE}"
 echo "HF_HOME:    ${HF_HOME}"
 echo "TMPDIR:     ${TMPDIR}"
 
@@ -61,7 +63,9 @@ python -u -m src.dataset_3d.generate \
     --model "${MODEL_NAME}" \
     --output-dir "${OUTPUT_DIR}" \
     --checkpoint-dir "${CHECKPOINT_DIR}" \
-    --chunk-size ${CHUNK_SIZE} \
+    --checkpoint-interval ${CHECKPOINT_INTERVAL} \
+    --storage-dtype "${STORAGE_DTYPE}" \
+    --split train \
     --device ${DEVICE}
 
 echo "=== Done: $(date) ==="

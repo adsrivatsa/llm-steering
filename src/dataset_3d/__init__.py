@@ -1,1 +1,1 @@
-# Token-aware 3D delta dataset generation module
+# Sample-level 3D dataset generation module

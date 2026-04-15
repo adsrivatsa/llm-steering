@@ -1,25 +1,26 @@
 """
-Dataset generation for learning the 3D delta Δ(E, L, D).
+Sample-level dataset generation for steering.
 
-Produces:
-  X: (N, L, E, D)  — averaged hidden states per token per layer, broadcast across experts
-  Y: (N, L, E, 1)  — expert activation risk difference (classification target)
+For each SQuAD sample and each layer l, produce one row:
+  D  : mean pooled hidden state of x1 at layer l            -> (hidden_dim,)
+  y1 : mean pooled softmax(router_logits) of x1 at layer l  -> (n_experts,)
+  y2 : mean pooled softmax(router_logits) of x2 at layer l  -> (n_experts,)
 
-N = number of selected tokens (all by default, or middle N by frequency)
-L = number of transformer layers
-E = number of experts per layer
-D = hidden state dimension
+x1 = "Document {context} Question {question}"
+x2 = "Question {question}"
 
-Usage:
-  python -m src.dataset_3d.generate \\
-      --model allenai/OLMoE-1B-7B-0125-Instruct \\
-      --output-dir dataset_3d_output
+Final shapes:
+  D  : (S * L, hidden_dim)
+  y1 : (S * L, n_experts)
+  y2 : (S * L, n_experts)
+
+Saved as a single file: dataset.pt
 """
 
 import argparse
 import os
 import time
-from collections import Counter
+from typing import Any
 
 import torch
 from datasets import load_dataset
@@ -29,532 +30,470 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 # ── Optional W&B ──────────────────────────────────────────────────────────────
 try:
     import wandb
+
     _WANDB_AVAILABLE = True
 except ImportError:
     wandb = None
     _WANDB_AVAILABLE = False
 
 
-def _wandb_log(data: dict, **kwargs):
-    """Log to wandb if available and initialized."""
+def _wandb_log(data: dict, **kwargs) -> None:
     if _WANDB_AVAILABLE and wandb.run is not None:
         wandb.log(data, **kwargs)
 
 
-# ── Model Configurations ─────────────────────────────────────────────────────
-# {model_name: (layers, top_k, experts)}
-MOE_EXPERT_CONFIG = {
-    "allenai/OLMoE-1B-7B-0125-Instruct": (16, 8, 64),
-    "mistralai/Mixtral-8x7B-Instruct-v0.1": (32, 2, 8),
-    "Qwen/Qwen3-30B-A3B": (48, 8, 128),
-    "microsoft/Phi-3.5-MoE-instruct": (32, 2, 16),
-}
-
-
 def load_squad(split: str = "train"):
-    """Load SQuAD v1.1 dataset."""
     return load_dataset("rajpurkar/squad", split=split)
 
 
-# ── Token Selection ───────────────────────────────────────────────────────────
+def build_prompts(example: dict[str, Any]) -> tuple[str, str]:
+    context = example["context"]
+    question = example["question"]
+    x1 = f"Document {context} Question {question}"
+    x2 = f"Question {question}"
+    return x1, x2
 
-def select_middle_tokens(dataset, tokenizer, n_tokens: int | None = None):
-    """Select tokens with middle-range frequency from SQuAD questions.
 
-    Returns:
-        selected_set: set of selected token IDs
-        token_id_to_index: token ID → contiguous index
-        index_to_token_id: contiguous index → token ID
-        freq_info: dict with frequency statistics
-    """
-    token_freq: Counter = Counter()
+def _resolve_input_device(model, fallback: str) -> torch.device:
+    try:
+        return model.get_input_embeddings().weight.device
+    except Exception:
+        try:
+            return next(model.parameters()).device
+        except StopIteration:
+            return torch.device(fallback)
 
-    for example in tqdm(dataset, desc="Counting token frequencies"):
-        question = example["question"]
-        for variant in [question, f" {question}"]:
-            ids = tokenizer.encode(variant, add_special_tokens=False)
-            token_freq.update(ids)
 
-    sorted_by_freq = sorted(token_freq.items(), key=lambda x: x[1])
-    total = len(sorted_by_freq)
-
-    if n_tokens is None or total <= n_tokens:
-        selected_list = [t[0] for t in sorted_by_freq]
-        freq_range = (sorted_by_freq[0][1], sorted_by_freq[-1][1])
-    else:
-        start = (total - n_tokens) // 2
-        end = start + n_tokens
-        selected_list = [t[0] for t in sorted_by_freq[start:end]]
-        freq_range = (sorted_by_freq[start][1], sorted_by_freq[end - 1][1])
-
-    selected_sorted = sorted(selected_list)
-    token_id_to_index = {tid: idx for idx, tid in enumerate(selected_sorted)}
-    index_to_token_id = {idx: tid for tid, idx in token_id_to_index.items()}
-
-    freq_info = {
-        "total_unique_tokens": total,
-        "selected_tokens": len(selected_sorted),
-        "min_freq": freq_range[0],
-        "max_freq": freq_range[1],
+def _tokenize_prompt(tokenizer, prompt: str, device: torch.device) -> dict[str, torch.Tensor]:
+    kwargs = {
+        "return_tensors": "pt",
+        "add_special_tokens": False,
     }
-    return set(selected_sorted), token_id_to_index, index_to_token_id, freq_info
+    model_max_length = getattr(tokenizer, "model_max_length", None)
+    if isinstance(model_max_length, int) and 0 < model_max_length < 100_000:
+        kwargs["truncation"] = True
+        kwargs["max_length"] = model_max_length
+
+    inputs = tokenizer(prompt, **kwargs)
+    return {k: v.to(device) for k, v in inputs.items()}
 
 
-# ── Question Token Range ─────────────────────────────────────────────────────
-
-def find_question_token_range(tokenizer, content: str, question: str):
-    """Return (start, end) token indices of the question within chat-formatted input.
-
-    Uses token-subsequence matching. Adapted from src/activation/main.py.
-    """
-    full_text = tokenizer.apply_chat_template(
-        [{"role": "user", "content": content}],
-        add_generation_prompt=True,
-        tokenize=False,
-    )
-    full_ids: list[int] = tokenizer(full_text, add_special_tokens=False)["input_ids"]
-
-    candidates: list[list[int]] = []
-    for q in [question, f" {question}"]:
-        ids = tokenizer(q, add_special_tokens=False)["input_ids"]
-        if ids and ids not in candidates:
-            candidates.append(ids)
-
-    best_start, best_end = None, None
-    for target_ids in candidates:
-        t_len = len(target_ids)
-        if t_len == 0 or t_len > len(full_ids):
-            continue
-        for i in range(len(full_ids) - t_len + 1):
-            if full_ids[i : i + t_len] == target_ids:
-                best_start, best_end = i, i + t_len
-
-    if best_start is None:
-        return 0, 0, []
-    return best_start, best_end, full_ids
+def _mean_pool_hidden_state(hidden_state: torch.Tensor) -> torch.Tensor:
+    # Hidden state can be (batch, seq, dim) or (seq, dim)
+    if hidden_state.dim() == 3:
+        hidden_state = hidden_state[0]
+    return hidden_state.float().mean(dim=0)
 
 
-# ── Data Collection ───────────────────────────────────────────────────────────
+def _mean_pool_router_softmax(router_logits: torch.Tensor, seq_len: int) -> torch.Tensor:
+    # Router logits can be (batch, seq, E), (seq, E), or (batch*seq, E)
+    if router_logits.dim() == 3:
+        router_logits = router_logits[0]
+    elif router_logits.dim() != 2:
+        raise ValueError(f"Unexpected router logits shape: {tuple(router_logits.shape)}")
 
-def collect_pass_data(
+    if router_logits.shape[0] != seq_len:
+        router_logits = router_logits[: min(router_logits.shape[0], seq_len)]
+    if router_logits.shape[0] == 0:
+        raise ValueError("Router logits contain zero tokens after alignment.")
+
+    probs = torch.softmax(router_logits.float(), dim=-1)
+    return probs.mean(dim=0)
+
+
+def process_sample(
     model,
     tokenizer,
-    prompts: list[tuple[str, str]],
-    token_id_to_index: dict[int, int],
-    layers: int,
-    experts: int,
-    top_k: int,
-    device,
-    pass_name: str = "x1",
-    collect_hidden_states: bool = True,
-    checkpoint_dir: str | None = None,
-    checkpoint_interval: int = 500,
-):
-    """Run one pass through the model, collecting data for selected tokens.
+    sample: dict[str, Any],
+    device: torch.device,
+    expected_layers: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    x1, x2 = build_prompts(sample)
 
-    Args:
-        prompts: list of (prompt_text, question_text) tuples
-        collect_hidden_states: only needed for x1
-
-    Returns:
-        H_sum: (N, L, D) accumulated hidden states (None if not collected)
-        A: (L, E, N) expert activation counts
-        N_counts: (N,) token occurrence counts
-    """
-    n_tokens = len(token_id_to_index)
-    hidden_dim = model.config.hidden_size
-
-    H_sum = torch.zeros(n_tokens, layers, hidden_dim) if collect_hidden_states else None
-    A = torch.zeros(layers, experts, n_tokens)
-    N_counts = torch.zeros(n_tokens, dtype=torch.long)
-
-    start_idx = 0
-    if checkpoint_dir:
-        ckpt_path = os.path.join(checkpoint_dir, f"{pass_name}_ckpt.pt")
-        if os.path.exists(ckpt_path):
-            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-            if ckpt["A"].shape[-1] == n_tokens:
-                start_idx = int(ckpt["step"])
-                A = ckpt["A"]
-                N_counts = ckpt["N"]
-                if collect_hidden_states and "H_sum" in ckpt:
-                    H_sum = ckpt["H_sum"]
-                print(f"[{pass_name}] Resuming from step {start_idx}")
-            else:
-                print(f"[{pass_name}] Checkpoint n_tokens ({ckpt['A'].shape[-1]}) mismatch with current ({n_tokens}). Starting from scratch.")
-
-    for idx in tqdm(
-        range(start_idx, len(prompts)),
-        desc=f"Pass {pass_name}",
-        initial=start_idx,
-        total=len(prompts),
-    ):
-        prompt_text, question_text = prompts[idx]
-
-        q_start, q_end, full_ids = find_question_token_range(
-            tokenizer, prompt_text, question_text
+    inputs_x1 = _tokenize_prompt(tokenizer, x1, device)
+    seq_len_x1 = int(inputs_x1["input_ids"].shape[1])
+    with torch.no_grad():
+        out_x1 = model(
+            **inputs_x1,
+            output_hidden_states=True,
+            output_router_logits=True,
         )
-        if q_start == 0 and q_end == 0:
-            continue
 
-        # Tokenise chat-formatted text
-        full_text = tokenizer.apply_chat_template(
-            [{"role": "user", "content": prompt_text}],
-            add_generation_prompt=True,
-            tokenize=False,
+    inputs_x2 = _tokenize_prompt(tokenizer, x2, device)
+    seq_len_x2 = int(inputs_x2["input_ids"].shape[1])
+    with torch.no_grad():
+        out_x2 = model(
+            **inputs_x2,
+            output_hidden_states=False,
+            output_router_logits=True,
         )
-        inputs = tokenizer(full_text, return_tensors="pt", add_special_tokens=False)
-        inputs = {k: v.to(device) for k, v in inputs.items()}
 
-        with torch.no_grad():
-            outputs = model(
-                **inputs,
-                output_hidden_states=collect_hidden_states,
-                output_router_logits=True,
+    hidden_states = out_x1.hidden_states
+    router_x1 = out_x1.router_logits
+    router_x2 = out_x2.router_logits
+    available_layers = min(len(hidden_states) - 1, len(router_x1), len(router_x2))
+    if expected_layers is not None:
+        if available_layers < expected_layers:
+            raise RuntimeError(
+                f"Expected at least {expected_layers} layers, got {available_layers}."
             )
+        n_layers = expected_layers
+    else:
+        n_layers = available_layers
 
-        router_logits = outputs.router_logits          # tuple, one per layer
-        hidden_states = outputs.hidden_states if collect_hidden_states else None
+    d_rows: list[torch.Tensor] = []
+    y1_rows: list[torch.Tensor] = []
+    y2_rows: list[torch.Tensor] = []
 
-        # Process question tokens
-        q_token_ids = full_ids[q_start:q_end]
-        for pos_offset, tid in enumerate(q_token_ids):
-            if tid not in token_id_to_index:
-                continue
-            t_idx = token_id_to_index[tid]
-            abs_pos = q_start + pos_offset
+    for layer_idx in range(n_layers):
+        d_rows.append(_mean_pool_hidden_state(hidden_states[layer_idx + 1]).cpu())
+        y1_rows.append(_mean_pool_router_softmax(router_x1[layer_idx], seq_len_x1).cpu())
+        y2_rows.append(_mean_pool_router_softmax(router_x2[layer_idx], seq_len_x2).cpu())
 
-            for layer in range(layers):
-                # Router logits may be (seq_len, E) or (batch*seq_len, E)
-                logits = router_logits[layer]
-                if logits.dim() == 3:
-                    logits = logits[0]           # remove batch dim
-                expert_logit = logits[abs_pos]   # (E,)
-                topk_idx = torch.topk(expert_logit, top_k).indices.cpu()
-                A[layer, topk_idx, t_idx] += 1
-
-                if collect_hidden_states:
-                    h = hidden_states[layer + 1][0, abs_pos].cpu().float()
-                    H_sum[t_idx, layer] += h
-
-            N_counts[t_idx] += 1
-
-        # Periodic checkpoint + wandb logging
-        if checkpoint_dir and (idx + 1) % checkpoint_interval == 0:
-            _save_ckpt(checkpoint_dir, pass_name, idx + 1, A, N_counts, H_sum)
-            tokens_seen = (N_counts > 0).sum().item()
-            _wandb_log({
-                f"{pass_name}/step": idx + 1,
-                f"{pass_name}/progress_pct": (idx + 1) / len(prompts) * 100,
-                f"{pass_name}/unique_tokens_seen": tokens_seen,
-                f"{pass_name}/total_token_occurrences": N_counts.sum().item(),
-            })
-
-    # Final checkpoint
-    if checkpoint_dir:
-        _save_ckpt(checkpoint_dir, pass_name, len(prompts), A, N_counts, H_sum)
-
-    # Log final pass stats
-    tokens_seen = (N_counts > 0).sum().item()
-    _wandb_log({
-        f"{pass_name}/final_unique_tokens": tokens_seen,
-        f"{pass_name}/final_total_occurrences": N_counts.sum().item(),
-        f"{pass_name}/completed": True,
-    })
-
-    return H_sum, A, N_counts
+    return torch.stack(d_rows), torch.stack(y1_rows), torch.stack(y2_rows)
 
 
-def _save_ckpt(directory, pass_name, step, A, N, H_sum=None):
-    os.makedirs(directory, exist_ok=True)
-    state = {"step": step, "A": A, "N": N}
-    if H_sum is not None:
-        state["H_sum"] = H_sum
-    tmp = os.path.join(directory, f"{pass_name}_ckpt.pt.tmp")
-    final = os.path.join(directory, f"{pass_name}_ckpt.pt")
+def _checkpoint_path(checkpoint_dir: str) -> str:
+    return os.path.join(checkpoint_dir, "sample_level_ckpt.pt")
+
+
+def save_checkpoint(
+    checkpoint_dir: str,
+    sample_idx: int,
+    num_samples: int,
+    num_layers: int,
+    hidden_dim: int,
+    n_experts: int,
+    D_all: torch.Tensor,
+    y1_all: torch.Tensor,
+    y2_all: torch.Tensor,
+    storage_dtype: torch.dtype,
+) -> None:
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    rows_filled = sample_idx * num_layers
+    d_partial = D_all[:rows_filled].clone()
+    y1_partial = y1_all[:rows_filled].clone()
+    y2_partial = y2_all[:rows_filled].clone()
+    state = {
+        "sample_idx": sample_idx,
+        "current_sample_idx": sample_idx,
+        "num_samples": num_samples,
+        "num_layers": num_layers,
+        "hidden_dim": hidden_dim,
+        "n_experts": n_experts,
+        "rows_filled": rows_filled,
+        "storage_dtype": str(storage_dtype),
+        "D": d_partial,
+        "y1": y1_partial,
+        "y2": y2_partial,
+        "D_partial": d_partial,
+        "y1_partial": y1_partial,
+        "y2_partial": y2_partial,
+    }
+    tmp = _checkpoint_path(checkpoint_dir) + ".tmp"
+    final = _checkpoint_path(checkpoint_dir)
     torch.save(state, tmp)
     os.replace(tmp, final)
-    print(f"  checkpoint saved: step={step}")
+    print(f"  checkpoint saved: sample_idx={sample_idx}/{num_samples}")
 
 
-# ── Dataset Computation & Saving ──────────────────────────────────────────────
-
-def compute_and_save(
-    H1_sum: torch.Tensor,
-    A1: torch.Tensor,
-    N1: torch.Tensor,
-    A2: torch.Tensor,
-    N2: torch.Tensor,
-    token_id_to_index: dict,
-    index_to_token_id: dict,
-    model_name: str,
-    output_dir: str,
-    chunk_size: int = 2000,
-):
-    """Compute X and Y from accumulated data and save in chunks.
-
-    X stored as (chunk, L, E, D) — hidden states broadcast across all experts.
-    Y stored as (chunk, L, E, 1).
-
-    Returns X_base (N, L, D) and Y (N, L, E, 1) in memory.
-    The full (N, L, E, D) expansion is done chunk-by-chunk to avoid RAM blow-up.
-    """
-    # Filter to tokens present in both passes
-    valid = (N1 > 0) & (N2 > 0)
-    valid_indices = valid.nonzero(as_tuple=True)[0]
-    print(f"Valid tokens (appear in both passes): {len(valid_indices)}")
-
-    N1_safe = N1[valid_indices].float().clamp(min=1)
-    N2_safe = N2[valid_indices].float().clamp(min=1)
-
-    # X_base: averaged hidden states from x1 pass — shape (N_valid, L, D)
-    X_base = H1_sum[valid_indices] / N1_safe.unsqueeze(1).unsqueeze(2)
-
-    # Y: risk difference — shape (N_valid, L, E, 1)
-    #   p1[l, e, n] = A1[l, e, n] / N1[n]
-    #   p2[l, e, n] = A2[l, e, n] / N2[n]
-    p1 = A1[:, :, valid_indices] / N1_safe.unsqueeze(0).unsqueeze(0)
-    p2 = A2[:, :, valid_indices] / N2_safe.unsqueeze(0).unsqueeze(0)
-    Y = (p1 - p2).permute(2, 0, 1).unsqueeze(-1)  # (N_valid, L, E, 1)
-
-    # Save chunks — X expanded to (chunk, L, E, D) per chunk
-    os.makedirs(output_dir, exist_ok=True)
-    layers, experts = A1.shape[0], A1.shape[1]
-    hidden_dim = X_base.shape[2]
-    N_total = X_base.shape[0]
-    n_chunks = 0
-
-    for i in range(0, N_total, chunk_size):
-        end = min(i + chunk_size, N_total)
-        # Expand X_base (chunk, L, D) → (chunk, L, E, D)
-        X_chunk = X_base[i:end].unsqueeze(2).expand(-1, -1, experts, -1).clone()
-        torch.save(
-            {"X": X_chunk, "Y": Y[i:end]},
-            os.path.join(output_dir, f"chunk_{n_chunks:04d}.pt"),
-        )
-        n_chunks += 1
-
-    # Save metadata
-    meta = {
-        "model_name": model_name,
-        "layers": layers,
-        "experts": experts,
-        "hidden_dim": hidden_dim,
-        "n_total": N_total,
-        "n_chunks": n_chunks,
-        "chunk_size": chunk_size,
-        "valid_indices": valid_indices,
-        "token_id_to_index": token_id_to_index,
-        "index_to_token_id": index_to_token_id,
-        "N1": N1,
-        "N2": N2,
+def load_checkpoint(checkpoint_dir: str | None) -> dict[str, Any] | None:
+    if not checkpoint_dir:
+        return None
+    path = _checkpoint_path(checkpoint_dir)
+    if not os.path.exists(path):
+        return None
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    canonical = {"sample_idx", "D", "y1", "y2", "num_layers", "hidden_dim", "n_experts"}
+    partial = {
+        "current_sample_idx",
+        "D_partial",
+        "y1_partial",
+        "y2_partial",
+        "num_layers",
+        "hidden_dim",
+        "n_experts",
     }
-    torch.save(meta, os.path.join(output_dir, "metadata.pt"))
-    print(f"Saved {n_chunks} chunks to {output_dir}")
-    print(f"  X shape per chunk: (≤{chunk_size}, {layers}, {experts}, {hidden_dim})")
-    print(f"  Y shape per chunk: (≤{chunk_size}, {layers}, {experts}, 1)")
-
-    # Disk size estimate
-    x_bytes = N_total * layers * experts * hidden_dim * 4
-    y_bytes = N_total * layers * experts * 4
-    print(f"  Total X size: {x_bytes / 1e9:.2f} GB")
-    print(f"  Total Y size: {y_bytes / 1e9:.2f} GB")
-    print(f"  Total dataset: {(x_bytes + y_bytes) / 1e9:.2f} GB")
-
-    # Log final dataset stats to wandb
-    _wandb_log({
-        "dataset/n_valid_tokens": N_total,
-        "dataset/n_chunks": n_chunks,
-        "dataset/X_shape": f"({N_total}, {layers}, {experts}, {hidden_dim})",
-        "dataset/Y_shape": f"({N_total}, {layers}, {experts}, 1)",
-        "dataset/X_size_gb": x_bytes / 1e9,
-        "dataset/Y_size_gb": y_bytes / 1e9,
-        "dataset/total_size_gb": (x_bytes + y_bytes) / 1e9,
-        "dataset/X_nan_count": int(torch.isnan(X_base).sum().item()),
-        "dataset/Y_nan_count": int(torch.isnan(Y).sum().item()),
-        "dataset/Y_mean": Y.mean().item(),
-        "dataset/Y_std": Y.std().item(),
-        "dataset/Y_min": Y.min().item(),
-        "dataset/Y_max": Y.max().item(),
-        "dataset/Y_pct_positive": (Y > 0).float().mean().item() * 100,
-        "dataset/Y_pct_negative": (Y < 0).float().mean().item() * 100,
-        "dataset/Y_pct_zero": (Y == 0).float().mean().item() * 100,
-    })
-
-    return X_base, Y
-
-
-# ── Main Entry ────────────────────────────────────────────────────────────────
-
-def build_prompts(dataset):
-    """Build (x1, x2) prompt pairs from SQuAD."""
-    prompts_x1, prompts_x2 = [], []
-    for ex in dataset:
-        doc = f"Document {ex['context']}"
-        q = f"Question {ex['question']}"
-        prompts_x1.append((f"{doc} {q}", q))
-        prompts_x2.append((q, q))
-    return prompts_x1, prompts_x2
+    keys = set(ckpt.keys())
+    if canonical.issubset(keys):
+        return ckpt
+    if partial.issubset(keys):
+        ckpt["sample_idx"] = int(ckpt["current_sample_idx"])
+        ckpt["D"] = ckpt["D_partial"]
+        ckpt["y1"] = ckpt["y1_partial"]
+        ckpt["y2"] = ckpt["y2_partial"]
+        return ckpt
+    print("Checkpoint missing required keys. Ignoring checkpoint.")
+    return None
 
 
 def generate(
     model_name: str,
     output_dir: str,
-    n_tokens: int | None = None,
-    chunk_size: int = 2000,
     max_examples: int | None = None,
     checkpoint_dir: str | None = None,
-    checkpoint_interval: int = 500,
+    checkpoint_interval: int = 100,
+    split: str = "train",
     device: str = "cuda",
+    storage_dtype: str = "float16",
 ):
-    """End-to-end dataset generation."""
     hf_token = os.environ.get("HF_TOKEN")
     t_start = time.time()
+    dtype_map = {"float16": torch.float16, "float32": torch.float32}
+    if storage_dtype not in dtype_map:
+        raise ValueError(f"Unsupported storage dtype: {storage_dtype}")
+    storage_dtype_t = dtype_map[storage_dtype]
 
-    # ── Initialize W&B ────────────────────────────────────────────────────────
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError("CUDA device requested but CUDA is not available.")
+
     if _WANDB_AVAILABLE and os.environ.get("WANDB_API_KEY"):
-        # Build a descriptive run name
-        model_short = model_name.split("/")[-1]
-        tok_str = f"{n_tokens // 1000}k" if n_tokens else "all"
-        ex_str = f"-{max_examples}ex" if max_examples else ""
-        run_name = f"datagen-{model_short}-{tok_str}tok{ex_str}"
-
+        run_suffix = f"{max_examples}ex" if max_examples else "full"
         wandb.init(
             entity="VLAvengers",
             project="tokenaware-steering-moe",
-            name=run_name,
+            name=f"sample-level-{model_name.split('/')[-1]}-{run_suffix}",
             config={
                 "model_name": model_name,
-                "n_tokens": n_tokens,
-                "chunk_size": chunk_size,
                 "max_examples": max_examples,
                 "checkpoint_interval": checkpoint_interval,
+                "split": split,
                 "device": device,
+                "storage_dtype": storage_dtype,
                 "output_dir": output_dir,
+                "checkpoint_dir": checkpoint_dir,
             },
-            tags=["dataset-generation", "3d-delta"],
+            tags=["dataset-generation", "sample-level", "squad"],
         )
-        print("✅ W&B run initialized")
+        print("W&B run initialized")
     else:
         if not _WANDB_AVAILABLE:
-            print("⚠️  wandb not installed — logging disabled")
+            print("wandb not installed: logging disabled")
         else:
-            print("⚠️  WANDB_API_KEY not set — logging disabled")
+            print("WANDB_API_KEY not set: logging disabled")
 
     print(f"Loading tokenizer: {model_name}")
     tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
 
-    print("Loading SQuAD...")
-    dataset = load_squad()
-    if max_examples:
+    print(f"Loading SQuAD split={split}...")
+    dataset = load_squad(split=split)
+    if max_examples is not None:
         dataset = dataset.select(range(min(max_examples, len(dataset))))
-    print(f"  Examples: {len(dataset)}")
-
-    print("Selecting middle-frequency tokens...")
-    selected_set, tid2idx, idx2tid, freq_info = select_middle_tokens(
-        dataset, tokenizer, n_tokens
-    )
-    print(f"  {freq_info}")
-
-    layers, top_k, experts = MOE_EXPERT_CONFIG[model_name]
-    print(f"Model config: L={layers}, K={top_k}, E={experts}")
-
-    # Log token selection info
-    _wandb_log({
-        "tokens/total_unique": freq_info["total_unique_tokens"],
-        "tokens/selected": freq_info["selected_tokens"],
-        "tokens/min_freq": freq_info["min_freq"],
-        "tokens/max_freq": freq_info["max_freq"],
-        "model/layers": layers,
-        "model/top_k": top_k,
-        "model/experts": experts,
-    })
+    num_samples = len(dataset)
+    if num_samples == 0:
+        raise RuntimeError("No samples available after applying split/max_examples.")
+    print(f"  Samples: {num_samples}")
 
     print(f"Loading model: {model_name}")
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        dtype=torch.float16,
-        device_map="auto",
-        token=hf_token,
-        trust_remote_code=True,
-    )
+    model_kwargs = {
+        "token": hf_token,
+        "trust_remote_code": True,
+    }
+    if device.startswith("cuda"):
+        model_kwargs["torch_dtype"] = torch.float16
+        model_kwargs["device_map"] = "auto"
+    model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+    if not device.startswith("cuda"):
+        model = model.to(device)
     model.eval()
-    hidden_dim = model.config.hidden_size
-    print(f"  Hidden dim: {hidden_dim}")
-    _wandb_log({"model/hidden_dim": hidden_dim})
+    input_device = _resolve_input_device(model, device)
+    print(f"  Model input device: {input_device}")
 
-    prompts_x1, prompts_x2 = build_prompts(dataset)
+    ckpt = load_checkpoint(checkpoint_dir)
 
-    # Pass 1: x1 (doc + question) — hidden states + router activations
-    print("\n=== Pass 1: x1 (document + question) ===")
-    t_pass1 = time.time()
-    H1, A1, N1 = collect_pass_data(
-        model, tokenizer, prompts_x1, tid2idx,
-        layers, experts, top_k, device,
-        pass_name="x1", collect_hidden_states=True,
-        checkpoint_dir=checkpoint_dir,
-        checkpoint_interval=checkpoint_interval,
+    d_all: torch.Tensor
+    y1_all: torch.Tensor
+    y2_all: torch.Tensor
+
+    if ckpt is not None and ckpt.get("num_samples") not in (None, num_samples):
+        print(
+            "Checkpoint sample count does not match current run. "
+            "Ignoring checkpoint and starting from scratch."
+        )
+        ckpt = None
+
+    if ckpt is None:
+        print("Bootstrapping shapes from first sample...")
+        d0, y10, y20 = process_sample(
+            model=model,
+            tokenizer=tokenizer,
+            sample=dataset[0],
+            device=input_device,
+            expected_layers=getattr(model.config, "num_hidden_layers", None),
+        )
+        num_layers = int(d0.shape[0])
+        hidden_dim = int(d0.shape[1])
+        n_experts = int(y10.shape[1])
+        total_rows = num_samples * num_layers
+
+        d_all = torch.zeros(total_rows, hidden_dim, dtype=storage_dtype_t)
+        y1_all = torch.zeros(total_rows, n_experts, dtype=storage_dtype_t)
+        y2_all = torch.zeros(total_rows, n_experts, dtype=storage_dtype_t)
+
+        d_all[:num_layers] = d0.to(storage_dtype_t)
+        y1_all[:num_layers] = y10.to(storage_dtype_t)
+        y2_all[:num_layers] = y20.to(storage_dtype_t)
+        start_sample = 1
+        print(
+            f"  Shapes resolved: L={num_layers}, D={hidden_dim}, E={n_experts}, "
+            f"rows={total_rows}"
+        )
+    else:
+        num_layers = int(ckpt["num_layers"])
+        hidden_dim = int(ckpt["hidden_dim"])
+        n_experts = int(ckpt["n_experts"])
+        total_rows = num_samples * num_layers
+        start_sample = int(ckpt["sample_idx"])
+        rows_filled = int(ckpt.get("rows_filled", ckpt["D"].shape[0]))
+        if rows_filled != start_sample * num_layers:
+            start_sample = rows_filled // num_layers
+            rows_filled = start_sample * num_layers
+        start_sample = min(start_sample, num_samples)
+        rows_filled = min(rows_filled, total_rows)
+
+        d_all = torch.zeros(total_rows, hidden_dim, dtype=storage_dtype_t)
+        y1_all = torch.zeros(total_rows, n_experts, dtype=storage_dtype_t)
+        y2_all = torch.zeros(total_rows, n_experts, dtype=storage_dtype_t)
+
+        d_all[:rows_filled] = ckpt["D"][:rows_filled].to(storage_dtype_t)
+        y1_all[:rows_filled] = ckpt["y1"][:rows_filled].to(storage_dtype_t)
+        y2_all[:rows_filled] = ckpt["y2"][:rows_filled].to(storage_dtype_t)
+        print(f"Resuming from sample {start_sample}/{num_samples}")
+
+    bytes_per_element = torch.finfo(storage_dtype_t).bits // 8
+    estimated_gb = total_rows * (hidden_dim + 2 * n_experts) * bytes_per_element / 1e9
+    print(
+        f"Estimated dataset size ({storage_dtype}): {estimated_gb:.2f} GB "
+        f"for rows={total_rows}"
     )
-    t_pass1_done = time.time()
-    _wandb_log({"timing/pass_x1_minutes": (t_pass1_done - t_pass1) / 60})
-
-    # Pass 2: x2 (question only) — router activations only
-    print("\n=== Pass 2: x2 (question only) ===")
-    t_pass2 = time.time()
-    _, A2, N2 = collect_pass_data(
-        model, tokenizer, prompts_x2, tid2idx,
-        layers, experts, top_k, device,
-        pass_name="x2", collect_hidden_states=False,
-        checkpoint_dir=checkpoint_dir,
-        checkpoint_interval=checkpoint_interval,
-    )
-    t_pass2_done = time.time()
-    _wandb_log({"timing/pass_x2_minutes": (t_pass2_done - t_pass2) / 60})
-
-    # Compute and save
-    print("\n=== Computing X and Y ===")
-    X, Y = compute_and_save(
-        H1, A1, N1, A2, N2,
-        tid2idx, idx2tid,
-        model_name, output_dir, chunk_size,
+    _wandb_log(
+        {
+            "dataset/rows": total_rows,
+            "dataset/layers": num_layers,
+            "dataset/hidden_dim": hidden_dim,
+            "dataset/experts": n_experts,
+            "dataset/estimated_size_gb": estimated_gb,
+        }
     )
 
-    # Final timing
-    t_total = time.time() - t_start
-    _wandb_log({
-        "timing/total_minutes": t_total / 60,
-        "status": "completed",
-    })
-    print(f"\nTotal time: {t_total / 60:.1f} minutes")
+    pbar = tqdm(range(start_sample, num_samples), desc="Generating rows (sample x layer)")
+    for sample_idx in pbar:
+        d_rows, y1_rows, y2_rows = process_sample(
+            model=model,
+            tokenizer=tokenizer,
+            sample=dataset[sample_idx],
+            device=input_device,
+            expected_layers=num_layers,
+        )
 
-    # Finish W&B run
+        row_start = sample_idx * num_layers
+        row_end = row_start + num_layers
+        d_all[row_start:row_end] = d_rows.to(storage_dtype_t)
+        y1_all[row_start:row_end] = y1_rows.to(storage_dtype_t)
+        y2_all[row_start:row_end] = y2_rows.to(storage_dtype_t)
+
+        if checkpoint_dir and (sample_idx + 1) % checkpoint_interval == 0:
+            save_checkpoint(
+                checkpoint_dir=checkpoint_dir,
+                sample_idx=sample_idx + 1,
+                num_samples=num_samples,
+                num_layers=num_layers,
+                hidden_dim=hidden_dim,
+                n_experts=n_experts,
+                D_all=d_all,
+                y1_all=y1_all,
+                y2_all=y2_all,
+                storage_dtype=storage_dtype_t,
+            )
+
+        if (sample_idx + 1) % 25 == 0:
+            pct = (sample_idx + 1) / num_samples * 100
+            _wandb_log({"progress/sample_idx": sample_idx + 1, "progress/pct": pct})
+
+    if checkpoint_dir:
+        save_checkpoint(
+            checkpoint_dir=checkpoint_dir,
+            sample_idx=num_samples,
+            num_samples=num_samples,
+            num_layers=num_layers,
+            hidden_dim=hidden_dim,
+            n_experts=n_experts,
+            D_all=d_all,
+            y1_all=y1_all,
+            y2_all=y2_all,
+            storage_dtype=storage_dtype_t,
+        )
+
+    metadata = {
+        "model_name": model_name,
+        "split": split,
+        "num_samples": num_samples,
+        "rows": total_rows,
+        "layers": num_layers,
+        "hidden_dim": hidden_dim,
+        "experts": n_experts,
+        "storage_dtype": storage_dtype,
+        "x1_template": "Document {context} Question {question}",
+        "x2_template": "Question {question}",
+        "y_definition": "mean_token_softmax_router_logits",
+        "pooling": "mean_over_all_tokens",
+    }
+
+    os.makedirs(output_dir, exist_ok=True)
+    dataset_path = os.path.join(output_dir, "dataset.pt")
+    tmp_path = dataset_path + ".tmp"
+    torch.save({"D": d_all, "y1": y1_all, "y2": y2_all, "metadata": metadata}, tmp_path)
+    os.replace(tmp_path, dataset_path)
+
+    elapsed_min = (time.time() - t_start) / 60
+    print(f"Saved dataset to: {dataset_path}")
+    print(f"D shape:  {tuple(d_all.shape)}")
+    print(f"y1 shape: {tuple(y1_all.shape)}")
+    print(f"y2 shape: {tuple(y2_all.shape)}")
+    print(f"Total time: {elapsed_min:.1f} minutes")
+
+    _wandb_log(
+        {
+            "dataset/path": dataset_path,
+            "dataset/D_nan_count": int(torch.isnan(d_all.float()).sum().item()),
+            "dataset/y1_nan_count": int(torch.isnan(y1_all.float()).sum().item()),
+            "dataset/y2_nan_count": int(torch.isnan(y2_all.float()).sum().item()),
+            "timing/total_minutes": elapsed_min,
+            "status": "completed",
+        }
+    )
     if _WANDB_AVAILABLE and wandb.run is not None:
         wandb.finish()
-        print("✅ W&B run finished")
 
-    return X, Y
+    return d_all, y1_all, y2_all
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate 3D delta training dataset")
-    parser.add_argument(
-        "--model", type=str,
-        default="allenai/OLMoE-1B-7B-0125-Instruct",
+    parser = argparse.ArgumentParser(
+        description="Generate sample-level dataset: D (hidden), y1/y2 (expert scores)"
     )
+    parser.add_argument("--model", type=str, default="allenai/OLMoE-1B-7B-0125-Instruct")
     parser.add_argument("--output-dir", type=str, default="dataset_3d_output")
     parser.add_argument("--checkpoint-dir", type=str, default="dataset_3d_ckpt")
-    parser.add_argument("--n-tokens", type=int, default=None)
-    parser.add_argument("--chunk-size", type=int, default=2000)
+    parser.add_argument("--checkpoint-interval", type=int, default=100)
     parser.add_argument("--max-examples", type=int, default=None)
+    parser.add_argument("--split", type=str, default="train")
     parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument(
+        "--storage-dtype",
+        type=str,
+        default="float16",
+        choices=["float16", "float32"],
+    )
     args = parser.parse_args()
 
     generate(
         model_name=args.model,
         output_dir=args.output_dir,
-        n_tokens=args.n_tokens,
-        chunk_size=args.chunk_size,
         max_examples=args.max_examples,
         checkpoint_dir=args.checkpoint_dir,
+        checkpoint_interval=args.checkpoint_interval,
+        split=args.split,
         device=args.device,
+        storage_dtype=args.storage_dtype,
     )
