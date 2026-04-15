@@ -34,9 +34,14 @@ mkdir -p "${SCRATCH_DIR}/dataset_3d/checkpoints"
 cd "${SLURM_SUBMIT_DIR:-$HOME/llm-steering}"
 
 # ── Activate Conda ────────────────────────────────────────────────────────────
-echo "Initializing Miniconda..."
-source "$HOME/miniconda/etc/profile.d/conda.sh"
-conda activate llm_steering
+CONDA_BASE="$HOME/miniconda"
+if [ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]; then
+    source "$CONDA_BASE/etc/profile.d/conda.sh"
+    conda activate llm_steering
+else
+    echo "  ❌ ERROR: Conda not found at $CONDA_BASE"
+    exit 1
+fi
 
 # ── Parameters (must match notebook Section 2 · Configuration) ────────────────
 MODEL_NAME="allenai/OLMoE-1B-7B-0125-Instruct"

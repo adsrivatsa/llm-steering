@@ -50,40 +50,30 @@ echo "  HF cache:    ${SCRATCH}/hf_cache"
 export TMPDIR="${SCRATCH}/tmp"
 mkdir -p "${TMPDIR}"
 
-export PATH="$HOME/miniconda/bin:$PATH"
-
+# --- Environment Activation ---
 ENV_NAME="llm_steering"
-if conda env list | grep -q "$ENV_NAME"; then
-    echo "  $ENV_NAME payload detected! Synchronizing missing packages..."
-    conda env update -f environment.yml --prune
+CONDA_BASE="$HOME/miniconda"
+
+if [ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]; then
+    source "$CONDA_BASE/etc/profile.d/conda.sh"
+    
+    if conda env list | grep -q "$ENV_NAME"; then
+        echo "  $ENV_NAME found. Synchronizing..."
+        conda env update -f environment.yml --prune
+    else
+        echo "  Creating $ENV_NAME..."
+        conda env create -f environment.yml
+    fi
+    
+    echo "  Activating $ENV_NAME..."
+    conda activate "$ENV_NAME"
 else
-    echo "  $ENV_NAME payload not found. Constructing fresh conda environment..."
-    conda env create -f environment.yml
+    echo "  ❌ ERROR: Conda not found at $CONDA_BASE. Please check installation."
+    exit 1
 fi
 
-echo "  Activating conda environment $ENV_NAME..."
-source "$HOME/miniconda/etc/profile.d/conda.sh"
-conda activate $ENV_NAME
-
-# Ensure torch has CUDA support (required for OLMoE generation on GPU jobs)
-echo "  Checking PyTorch CUDA support..."
-if python - <<'PY'
-import torch, sys
-print(f"    torch={torch.__version__}")
-print(f"    torch.version.cuda={torch.version.cuda}")
-sys.exit(0 if torch.version.cuda else 1)
-PY
-then
-    echo "  CUDA-enabled torch build detected."
-else
-    echo "  Installing CUDA-enabled torch wheel (cu126)..."
-    pip install --upgrade --index-url https://download.pytorch.org/whl/cu126 torch==2.10.0
-fi
-
-python - <<'PY'
-import torch
-print(f"  Final torch check: version={torch.__version__}, cuda_build={torch.version.cuda}")
-PY
+echo "  Checking environment..."
+python -c "import torch; print(f'  ✅ Torch ready: {torch.__version__} (CUDA: {torch.version.cuda})')"
 
 # Check for the vllm wheel mentioned in pyproject.toml
 VLLM_WHEEL="vllm-0.18.0+cu126-cp312-cp312-linux_x86_64.whl"
