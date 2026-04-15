@@ -115,29 +115,38 @@ MAX_EXAMPLES_ARG = f"--max-examples {MAX_EXAMPLES}" if MAX_EXAMPLES is not None 
 # ## 4 · Verification
 
 # %%
-!conda run -n llm_steering python -u -c "
-import os, torch
-dataset_path = '{DATASET_FILE}'
-obj = torch.load(dataset_path, map_location='cpu', weights_only=False)
-D, y1, y2, meta = obj['D'], obj['y1'], obj['y2'], obj['metadata']
-rows = meta['rows']
-hidden_dim = meta['hidden_dim']
-experts = meta['experts']
-print(f'Loaded: {dataset_path}')
-print(f'D shape:  {tuple(D.shape)}')
-print(f'y1 shape: {tuple(y1.shape)}')
-print(f'y2 shape: {tuple(y2.shape)}')
-print(f'Metadata rows={rows}, D={hidden_dim}, E={experts}, L={meta[\"layers\"]}, S={meta[\"num_samples\"]}')
-assert D.shape == (rows, hidden_dim)
-assert y1.shape == (rows, experts)
-assert y2.shape == (rows, experts)
-assert D.dtype == y1.dtype == y2.dtype
-assert not torch.isnan(D.float()).any()
-assert not torch.isnan(y1.float()).any()
-assert not torch.isnan(y2.float()).any()
-sum_y1 = y1.float().sum(dim=-1)
-sum_y2 = y2.float().sum(dim=-1)
-print(f'y1 row-sum mean: {sum_y1.mean().item():.6f}')
-print(f'y2 row-sum mean: {sum_y2.mean().item():.6f}')
-print('Verification checks passed.')
-"
+# %%writefile verify_dataset.py
+import subprocess, textwrap, pathlib
+_verify_code = textwrap.dedent("""\
+    import sys
+    import torch
+
+    dataset_path = sys.argv[1]
+    obj = torch.load(dataset_path, map_location='cpu', weights_only=False)
+    D, y1, y2, meta = obj['D'], obj['y1'], obj['y2'], obj['metadata']
+    rows = meta['rows']
+    hidden_dim = meta['hidden_dim']
+    experts = meta['experts']
+    print(f'Loaded: {dataset_path}')
+    print(f'D shape:  {tuple(D.shape)}')
+    print(f'y1 shape: {tuple(y1.shape)}')
+    print(f'y2 shape: {tuple(y2.shape)}')
+    print(f"Metadata rows={rows}, D={hidden_dim}, E={experts}, L={meta['layers']}, S={meta['num_samples']}")
+    assert D.shape == (rows, hidden_dim)
+    assert y1.shape == (rows, experts)
+    assert y2.shape == (rows, experts)
+    assert D.dtype == y1.dtype == y2.dtype
+    assert not torch.isnan(D.float()).any()
+    assert not torch.isnan(y1.float()).any()
+    assert not torch.isnan(y2.float()).any()
+    sum_y1 = y1.float().sum(dim=-1)
+    sum_y2 = y2.float().sum(dim=-1)
+    print(f'y1 row-sum mean: {sum_y1.mean().item():.6f}')
+    print(f'y2 row-sum mean: {sum_y2.mean().item():.6f}')
+    print('Verification checks passed.')
+""")
+pathlib.Path("verify_dataset.py").write_text(_verify_code)
+
+# %%
+!conda run -n llm_steering python -u verify_dataset.py "{DATASET_FILE}"
+

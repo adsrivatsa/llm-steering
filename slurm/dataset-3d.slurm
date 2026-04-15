@@ -60,21 +60,23 @@ echo "HF_HOME:    ${HF_HOME}"
 echo "TMPDIR:     ${TMPDIR}"
 
 echo "=== Torch/CUDA preflight ==="
-python -u -c "
+cat > /tmp/_cuda_preflight.py << 'PYEOF'
 import os
 import torch
 
-print(f'torch={torch.__version__}')
-print(f'torch.version.cuda={torch.version.cuda}')
-print(f'cuda.is_available={torch.cuda.is_available()}')
-print(f'cuda.device_count={torch.cuda.device_count()}')
-print(f'CUDA_VISIBLE_DEVICES={os.environ.get(\"CUDA_VISIBLE_DEVICES\")}')
+print(f"torch={torch.__version__}")
+print(f"torch.version.cuda={torch.version.cuda}")
+print(f"cuda.is_available={torch.cuda.is_available()}")
+print(f"cuda.device_count={torch.cuda.device_count()}")
+print(f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}")
 if not torch.cuda.is_available():
     raise SystemExit(
-        'CUDA is unavailable in this job environment. '
-        'Use a GPU allocation and install a CUDA-enabled torch build.'
+        "CUDA is unavailable in this job environment. "
+        "Use a GPU allocation and install a CUDA-enabled torch build."
     )
-"
+PYEOF
+python -u /tmp/_cuda_preflight.py
+
 
 python -u -m src.dataset_3d.generate \
     --model "${MODEL_NAME}" \
