@@ -34,12 +34,15 @@ mkdir -p "${SCRATCH_DIR}/dataset_3d/checkpoints"
 cd "${SLURM_SUBMIT_DIR:-$HOME/llm-steering}"
 
 # ── Activate Conda ────────────────────────────────────────────────────────────
-CONDA_BASE="$HOME/miniconda"
-if [ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]; then
-    source "$CONDA_BASE/etc/profile.d/conda.sh"
-    conda activate llm_steering
+# ── Activate Conda ────────────────────────────────────────────────────────────
+# ── Activate Conda ────────────────────────────────────────────────────────────
+CONDA_DIR="$HOME/miniconda"
+export PATH="$CONDA_DIR/bin:$PATH"
+
+if [ -f "$CONDA_DIR/etc/profile.d/conda.sh" ]; then
+    source "$CONDA_DIR/etc/profile.d/conda.sh"
 else
-    echo "  ❌ ERROR: Conda not found at $CONDA_BASE"
+    echo "  ❌ ERROR: Conda not found at $CONDA_DIR"
     exit 1
 fi
 
@@ -64,7 +67,7 @@ echo "HF_HOME:    ${HF_HOME}"
 echo "TMPDIR:     ${TMPDIR}"
 
 echo "=== Torch/CUDA preflight ==="
-python -u -c "
+conda run --no-capture-output -n llm_steering python -u -c "
 import os
 import torch
 
@@ -80,7 +83,7 @@ if not torch.cuda.is_available():
     )
 "
 
-python -u -m src.dataset_3d.generate \
+conda run --no-capture-output -n llm_steering python -u -m src.dataset_3d.generate \
     --model "${MODEL_NAME}" \
     --output-dir "${OUTPUT_DIR}" \
     --checkpoint-dir "${CHECKPOINT_DIR}" \

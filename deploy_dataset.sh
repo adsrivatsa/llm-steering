@@ -50,36 +50,34 @@ echo "  HF cache:    ${SCRATCH}/hf_cache"
 export TMPDIR="${SCRATCH}/tmp"
 mkdir -p "${TMPDIR}"
 
-# --- Environment Activation ---
+# --- Environment Management ---
 ENV_NAME="llm_steering"
-CONDA_BASE="$HOME/miniconda"
+CONDA_DIR="$HOME/miniconda"
+export PATH="$CONDA_DIR/bin:$PATH"
 
-if [ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]; then
-    source "$CONDA_BASE/etc/profile.d/conda.sh"
+if [ -f "$CONDA_DIR/etc/profile.d/conda.sh" ]; then
+    source "$CONDA_DIR/etc/profile.d/conda.sh"
     
     if conda env list | grep -q "$ENV_NAME"; then
         echo "  $ENV_NAME found. Synchronizing..."
-        conda env update -f environment.yml --prune
+        conda run -n "$ENV_NAME" pip install -r requirements.txt
     else
         echo "  Creating $ENV_NAME..."
         conda env create -f environment.yml
     fi
-    
-    echo "  Activating $ENV_NAME..."
-    conda activate "$ENV_NAME"
 else
-    echo "  ❌ ERROR: Conda not found at $CONDA_BASE. Please check installation."
+    echo "  ❌ ERROR: Conda not found at $CONDA_DIR."
     exit 1
 fi
 
-echo "  Checking environment..."
-python -c "import torch; print(f'  ✅ Torch ready: {torch.__version__} (CUDA: {torch.version.cuda})')"
+echo "  Checking environment via conda run..."
+conda run --no-capture-output -n "$ENV_NAME" python -c "import torch; print(f'  ✅ Torch ready: {torch.__version__} (CUDA: {torch.version.cuda})')"
 
 # Check for the vllm wheel mentioned in pyproject.toml
 VLLM_WHEEL="vllm-0.18.0+cu126-cp312-cp312-linux_x86_64.whl"
 if [ -f "$VLLM_WHEEL" ]; then
-    echo "  Installing local vLLM wheel..."
-    pip install "$VLLM_WHEEL"
+    echo "  Installing local vLLM wheel into $ENV_NAME..."
+    conda run -n "$ENV_NAME" pip install "$VLLM_WHEEL"
 else
     echo "  ⚠️  WARNING: $VLLM_WHEEL not found. Installation may fail if required."
 fi
