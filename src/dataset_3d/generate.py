@@ -42,6 +42,16 @@ def _wandb_log(data: dict, **kwargs) -> None:
         wandb.log(data, **kwargs)
 
 
+def _cuda_diagnostics() -> str:
+    return (
+        f"torch={torch.__version__}, "
+        f"torch.version.cuda={torch.version.cuda}, "
+        f"cuda_available={torch.cuda.is_available()}, "
+        f"cuda_device_count={torch.cuda.device_count()}, "
+        f"cuda_visible_devices={os.environ.get('CUDA_VISIBLE_DEVICES')}"
+    )
+
+
 def load_squad(split: str = "train"):
     return load_dataset("rajpurkar/squad", split=split)
 
@@ -245,7 +255,12 @@ def generate(
     storage_dtype_t = dtype_map[storage_dtype]
 
     if device.startswith("cuda") and not torch.cuda.is_available():
-        raise RuntimeError("CUDA device requested but CUDA is not available.")
+        raise RuntimeError(
+            "CUDA device requested but CUDA is not available.\n"
+            f"Diagnostics: {_cuda_diagnostics()}\n"
+            "Make sure this runs on a GPU node (e.g., via sbatch/srun) and that "
+            "the conda env has a CUDA-enabled torch build."
+        )
 
     if _WANDB_AVAILABLE and os.environ.get("WANDB_API_KEY"):
         run_suffix = f"{max_examples}ex" if max_examples else "full"

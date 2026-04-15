@@ -24,7 +24,6 @@ os.environ["PATH"] = f"{miniconda_path}:" + os.environ.get("PATH", "")
 
 SCRATCH = os.environ.get("SCRATCH_DIR", "/scratch1/kelidari")
 os.environ["HF_HOME"] = f"{SCRATCH}/hf_cache"
-os.environ["TRANSFORMERS_CACHE"] = f"{SCRATCH}/hf_cache"
 os.environ["TMPDIR"] = f"{SCRATCH}/tmp"
 os.makedirs(os.environ["HF_HOME"], exist_ok=True)
 os.makedirs(os.environ["TMPDIR"], exist_ok=True)
@@ -87,6 +86,16 @@ print(f"Rows (S*L):          {rows:,}")
 print(f"Per-row bytes:       {per_row_bytes:,}")
 print(f"Estimated dataset:   {total_gb:.2f} GB ({STORAGE_DTYPE})")
 print("Formula: S * L * (D + 2E) * bytes_per_element")
+
+# %%
+import torch
+print(f"torch={torch.__version__}")
+print(f"torch.version.cuda={torch.version.cuda}")
+print(f"cuda.is_available={torch.cuda.is_available()}")
+if DEVICE.startswith("cuda") and not torch.cuda.is_available():
+    raise RuntimeError(
+        "CUDA requested but unavailable. Run this in a GPU allocation and use a CUDA-enabled torch build."
+    )
 
 # %% [markdown]
 # ## 3 · Run Dataset Generation

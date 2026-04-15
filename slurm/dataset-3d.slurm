@@ -20,7 +20,6 @@ module load gcc/13.3.0
 
 export SCRATCH_DIR="/scratch1/kelidari"
 export HF_HOME="${SCRATCH_DIR}/hf_cache"
-export TRANSFORMERS_CACHE="${SCRATCH_DIR}/hf_cache"
 export TMPDIR="${SCRATCH_DIR}/tmp"
 export HF_TOKEN="${HF_TOKEN}"
 export WANDB_API_KEY="${WANDB_API_KEY}"
@@ -58,6 +57,23 @@ echo "Dataset row schema: S x L rows with D(hidden), y1(x1 expert probs), y2(x2 
 echo "Storage:    ${STORAGE_DTYPE}"
 echo "HF_HOME:    ${HF_HOME}"
 echo "TMPDIR:     ${TMPDIR}"
+
+echo "=== Torch/CUDA preflight ==="
+python -u -c "
+import os
+import torch
+
+print(f'torch={torch.__version__}')
+print(f'torch.version.cuda={torch.version.cuda}')
+print(f'cuda.is_available={torch.cuda.is_available()}')
+print(f'cuda.device_count={torch.cuda.device_count()}')
+print(f'CUDA_VISIBLE_DEVICES={os.environ.get(\"CUDA_VISIBLE_DEVICES\")}')
+if not torch.cuda.is_available():
+    raise SystemExit(
+        'CUDA is unavailable in this job environment. '
+        'Use a GPU allocation and install a CUDA-enabled torch build.'
+    )
+"
 
 python -u -m src.dataset_3d.generate \
     --model "${MODEL_NAME}" \

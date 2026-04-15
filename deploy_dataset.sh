@@ -65,6 +65,26 @@ echo "  Activating conda environment $ENV_NAME..."
 source "$HOME/miniconda/etc/profile.d/conda.sh"
 conda activate $ENV_NAME
 
+# Ensure torch has CUDA support (required for OLMoE generation on GPU jobs)
+echo "  Checking PyTorch CUDA support..."
+if python - <<'PY'
+import torch, sys
+print(f"    torch={torch.__version__}")
+print(f"    torch.version.cuda={torch.version.cuda}")
+sys.exit(0 if torch.version.cuda else 1)
+PY
+then
+    echo "  CUDA-enabled torch build detected."
+else
+    echo "  Installing CUDA-enabled torch wheel (cu126)..."
+    pip install --upgrade --index-url https://download.pytorch.org/whl/cu126 torch==2.10.0
+fi
+
+python - <<'PY'
+import torch
+print(f"  Final torch check: version={torch.__version__}, cuda_build={torch.version.cuda}")
+PY
+
 # Check for the vllm wheel mentioned in pyproject.toml
 VLLM_WHEEL="vllm-0.18.0+cu126-cp312-cp312-linux_x86_64.whl"
 if [ -f "$VLLM_WHEEL" ]; then
