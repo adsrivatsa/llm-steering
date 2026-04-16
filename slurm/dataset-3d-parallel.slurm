@@ -43,9 +43,10 @@ echo "  ✅ Conda environment llm_steering active"
 # ── Parameters ────────────────────────────────────────────────────────────────
 case "${MODEL_KEY}" in
     "phi35moe") MODEL_NAME="microsoft/Phi-3.5-MoE-instruct" ;;
-    "qwen3moe") MODEL_NAME="Qwen/Qwen2.5-1.5B-Instruct" ;;
+    "qwen3moe") MODEL_NAME="Qwen/Qwen3-30B-A3B" ;;
     "gptoss")   MODEL_NAME="openai/gpt-oss-20b" ;;
     "mixtral")  MODEL_NAME="mistralai/Mixtral-8x7B-Instruct-v0.1" ;;
+    "olmoe")    MODEL_NAME="allenai/OLMoE-1B-7B-0125-Instruct" ;;
     *)          MODEL_NAME="allenai/OLMoE-1B-7B-0125-Instruct" ;;
 esac
 

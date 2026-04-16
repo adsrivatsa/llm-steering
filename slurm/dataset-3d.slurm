@@ -28,8 +28,16 @@ export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 # Create scratch dirs
 mkdir -p "${HF_HOME}"
 mkdir -p "${TMPDIR}"
-mkdir -p "${SCRATCH_DIR}/dataset_3d/output"
-mkdir -p "${SCRATCH_DIR}/dataset_3d/checkpoints"
+# --- Experiment Configuration ---
+EXP_ID="${EXP_ID:-1}"
+MODEL_KEY="${MODEL_KEY:-olmoe}"
+EXP_LABEL="EXP${EXP_ID}"
+
+mkdir -p "${SCRATCH_DIR}/dataset_3d/output/${EXP_LABEL}"
+mkdir -p "${SCRATCH_DIR}/dataset_3d/checkpoints/${EXP_LABEL}"
+mkdir -p "${SCRATCH_DIR}/hf_cache"
+
+export PYTHONNOUSERSITE=1
 
 cd "${SLURM_SUBMIT_DIR:-$HOME/llm-steering}"
 
@@ -39,13 +47,21 @@ source "$HOME/miniconda/etc/profile.d/conda.sh"
 conda activate llm_steering
 echo "  ✅ Conda environment llm_steering active"
 
-# ── Parameters (must match notebook Section 2 · Configuration) ────────────────
-MODEL_NAME="allenai/OLMoE-1B-7B-0125-Instruct"
+# ── Parameters ────────────────────────────────────────────────────────────────
+case "${MODEL_KEY}" in
+    "phi35moe") MODEL_NAME="microsoft/Phi-3.5-MoE-instruct" ;;
+    "qwen3moe") MODEL_NAME="Qwen/Qwen3-30B-A3B" ;;
+    "gptoss")   MODEL_NAME="openai/gpt-oss-20b" ;;
+    "mixtral")  MODEL_NAME="mistralai/Mixtral-8x7B-Instruct-v0.1" ;;
+    "olmoe")    MODEL_NAME="allenai/OLMoE-1B-7B-0125-Instruct" ;;
+    *)          MODEL_NAME="allenai/OLMoE-1B-7B-0125-Instruct" ;;
+esac
+
 DEVICE="cuda"
 STORAGE_DTYPE="float16"
 CHECKPOINT_INTERVAL=100
-OUTPUT_DIR="${SCRATCH_DIR}/dataset_3d/output"
-CHECKPOINT_DIR="${SCRATCH_DIR}/dataset_3d/checkpoints"
+OUTPUT_DIR="${SCRATCH_DIR}/dataset_3d/output/${EXP_LABEL}"
+CHECKPOINT_DIR="${SCRATCH_DIR}/dataset_3d/checkpoints/${EXP_LABEL}"
 
 # ── Run ───────────────────────────────────────────────────────────────────────
 echo "=== Starting dataset generation: $(date) ==="
@@ -85,6 +101,7 @@ python -u -m src.dataset_3d.generate \
     --checkpoint-interval ${CHECKPOINT_INTERVAL} \
     --storage-dtype "${STORAGE_DTYPE}" \
     --split train \
-    --device ${DEVICE}
+    --device ${DEVICE} \
+    --wandb-group "${EXP_LABEL}"
 
 echo "=== Done: $(date) ==="
