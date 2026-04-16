@@ -8,7 +8,7 @@
 #SBATCH --mem=16GB
 #SBATCH --gpus-per-task=1
 #SBATCH --constraint=v100
-#SBATCH --time=24:00:00
+#SBATCH --time=4:00:00
 #SBATCH --output=%x_%j.out
 #SBATCH --error=%x_%j.err
 
