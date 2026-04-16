@@ -248,6 +248,9 @@ def generate(
     storage_dtype: str = "float16",
     shard_index: int | None = None,
     num_shards: int | None = None,
+    wandb_project: str | None = None,
+    wandb_entity: str | None = None,
+    wandb_group: str | None = None,
 ):
     hf_token = os.environ.get("HF_TOKEN")
     t_start = time.time()
@@ -279,8 +282,9 @@ def generate(
         else:
             run_suffix = "full"
         wandb.init(
-            entity="VLAvengers",
-            project="tokenaware-steering-moe",
+            entity=wandb_entity or "VLAvengers",
+            project=wandb_project or "tokenaware-steering-moe",
+            group=wandb_group,
             name=f"sample-level-{model_name.split('/')[-1]}-{run_suffix}",
             config={
                 "model_name": model_name,
@@ -536,6 +540,9 @@ if __name__ == "__main__":
         "--num-shards", type=int, default=None,
         help="Total number of shards for parallel generation",
     )
+    parser.add_argument("--wandb-project", type=str, default=None)
+    parser.add_argument("--wandb-entity", type=str, default=None)
+    parser.add_argument("--wandb-group", type=str, default=None)
     args = parser.parse_args()
 
     generate(
@@ -549,4 +556,7 @@ if __name__ == "__main__":
         storage_dtype=args.storage_dtype,
         shard_index=args.shard_index,
         num_shards=args.num_shards,
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        wandb_group=args.wandb_group,
     )

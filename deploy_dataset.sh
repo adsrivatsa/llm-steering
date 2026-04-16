@@ -38,12 +38,21 @@ echo ""
 echo "═══════════════════════════════════════════"
 echo "  2 · Setup directories & environment"
 echo "═══════════════════════════════════════════"
-mkdir -p "${DATASET_DIR}/output"
-mkdir -p "${DATASET_DIR}/checkpoints"
+# --- Experiment Configuration ---
+EXP_ID="${EXP_ID:-1}"
+MODEL_KEY="${MODEL_KEY:-olmoe}"
+EXP_LABEL="EXP${EXP_ID}"
+
+mkdir -p "${DATASET_DIR}/output/${EXP_LABEL}"
+mkdir -p "${DATASET_DIR}/shards/${EXP_LABEL}"
+mkdir -p "${DATASET_DIR}/checkpoints/${EXP_LABEL}"
+mkdir -p "slurm/logs/${EXP_LABEL}"
 mkdir -p "${SCRATCH}/hf_cache"
-echo "  Output:      ${DATASET_DIR}/output"
-echo "  Final file:  ${DATASET_DIR}/output/dataset.pt"
-echo "  Checkpoints: ${DATASET_DIR}/checkpoints"
+echo "  Experiment:  ${EXP_LABEL}"
+echo "  Model Key:   ${MODEL_KEY}"
+echo "  Output:      ${DATASET_DIR}/output/${EXP_LABEL}"
+echo "  Shards:      ${DATASET_DIR}/shards/${EXP_LABEL}"
+echo "  Logs:        slurm/logs/${EXP_LABEL}"
 echo "  HF cache:    ${SCRATCH}/hf_cache"
 
 # --- Environment Setup ---
@@ -79,11 +88,13 @@ echo "════════════════════════�
 echo "  3 · Submit SLURM job"
 echo "═══════════════════════════════════════════"
 JOB_ID=$(sbatch --parsable \
-    --export=ALL,HF_TOKEN="${HF_TOKEN}",WANDB_API_KEY="${WANDB_API_KEY}" \
-    slurm/dataset-3d.slurm)
+    --export=ALL,HF_TOKEN="${HF_TOKEN}",WANDB_API_KEY="${WANDB_API_KEY}",EXP_ID="${EXP_ID}",MODEL_KEY="${MODEL_KEY}" \
+    --output="slurm/logs/${EXP_LABEL}/ds3d_shard_%A_%a.out" \
+    --error="slurm/logs/${EXP_LABEL}/ds3d_shard_%A_%a.err" \
+    slurm/dataset-3d-parallel.slurm)
 
 echo "  ✅ Job submitted: ${JOB_ID}"
 echo ""
 echo "  Monitor:"
 echo "    squeue -u ${USER}"
-echo "    tail -f ${PROJECT_DIR}/dataset3d_${JOB_ID}.out"
+echo "    tail -f slurm/logs/${EXP_LABEL}/ds3d_shard_${JOB_ID}_0.out"
