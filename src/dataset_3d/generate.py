@@ -246,6 +246,8 @@ def generate(
     split: str = "train",
     device: str = "cuda",
     storage_dtype: str = "float16",
+    shard_index: int | None = None,
+    num_shards: int | None = None,
 ):
     hf_token = os.environ.get("HF_TOKEN")
     t_start = time.time()
@@ -253,6 +255,13 @@ def generate(
     if storage_dtype not in dtype_map:
         raise ValueError(f"Unsupported storage dtype: {storage_dtype}")
     storage_dtype_t = dtype_map[storage_dtype]
+
+    # Validate shard args
+    if (shard_index is None) != (num_shards is None):
+        raise ValueError("Both --shard-index and --num-shards must be provided together")
+    # Sharding mode: disable checkpoints (each shard is small enough)
+    if shard_index is not None:
+        checkpoint_dir = None
 
     if device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError(
@@ -263,7 +272,12 @@ def generate(
         )
 
     if _WANDB_AVAILABLE and os.environ.get("WANDB_API_KEY"):
-        run_suffix = f"{max_examples}ex" if max_examples else "full"
+        if shard_index is not None:
+            run_suffix = f"shard{shard_index:02d}-of-{num_shards}"
+        elif max_examples:
+            run_suffix = f"{max_examples}ex"
+        else:
+            run_suffix = "full"
         wandb.init(
             entity="VLAvengers",
             project="tokenaware-steering-moe",
@@ -294,6 +308,16 @@ def generate(
     dataset = load_squad(split=split)
     if max_examples is not None:
         dataset = dataset.select(range(min(max_examples, len(dataset))))
+
+    # Shard selection: each shard processes its assigned slice
+    if shard_index is not None and num_shards is not None:
+        total = len(dataset)
+        shard_size = total // num_shards
+        shard_start = shard_index * shard_size
+        shard_end = shard_start + shard_size if shard_index < num_shards - 1 else total
+        dataset = dataset.select(range(shard_start, shard_end))
+        print(f"  Shard {shard_index}/{num_shards}: samples [{shard_start}, {shard_end}) = {len(dataset)} samples")
+
     num_samples = len(dataset)
     if num_samples == 0:
         raise RuntimeError("No samples available after applying split/max_examples.")
@@ -453,9 +477,13 @@ def generate(
         "y_definition": "mean_token_softmax_router_logits",
         "pooling": "mean_over_all_tokens",
     }
+    if shard_index is not None:
+        metadata["shard_index"] = shard_index
+        metadata["num_shards"] = num_shards
 
     os.makedirs(output_dir, exist_ok=True)
-    dataset_path = os.path.join(output_dir, "dataset.pt")
+    filename = f"shard_{shard_index:02d}.pt" if shard_index is not None else "dataset.pt"
+    dataset_path = os.path.join(output_dir, filename)
     tmp_path = dataset_path + ".tmp"
     torch.save({"D": d_all, "y1": y1_all, "y2": y2_all, "metadata": metadata}, tmp_path)
     os.replace(tmp_path, dataset_path)
@@ -500,6 +528,14 @@ if __name__ == "__main__":
         default="float16",
         choices=["float16", "float32"],
     )
+    parser.add_argument(
+        "--shard-index", type=int, default=None,
+        help="Shard index for parallel generation (0-based)",
+    )
+    parser.add_argument(
+        "--num-shards", type=int, default=None,
+        help="Total number of shards for parallel generation",
+    )
     args = parser.parse_args()
 
     generate(
@@ -511,4 +547,6 @@ if __name__ == "__main__":
         split=args.split,
         device=args.device,
         storage_dtype=args.storage_dtype,
+        shard_index=args.shard_index,
+        num_shards=args.num_shards,
     )
