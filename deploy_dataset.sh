@@ -54,16 +54,16 @@ export PATH="$HOME/miniconda/bin:$PATH"
 source "$HOME/miniconda/etc/profile.d/conda.sh"
 
 ENV_NAME="llm_steering"
-if conda env list | grep -q "$ENV_NAME"; then
-    echo "  $ENV_NAME found. Synchronizing packages..."
-    conda env update -f environment.yml --prune
-else
-    echo "  $ENV_NAME not found. Creating fresh conda environment..."
-    conda env create -f environment.yml
-fi
+# if conda env list | grep -q "$ENV_NAME"; then
+#     echo "  $ENV_NAME found. Synchronizing packages..."
+#     conda env update -f environment.yml --prune
+# else
+#     echo "  $ENV_NAME not found. Creating fresh conda environment..."
+#     conda env create -f environment.yml
+# fi
 
-conda activate "$ENV_NAME"
-echo "  ✅ Conda environment $ENV_NAME active"
+# conda activate "$ENV_NAME"
+# echo "  ✅ Conda environment $ENV_NAME active"
 
 # Check for the vllm wheel mentioned in pyproject.toml
 VLLM_WHEEL="vllm-0.18.0+cu126-cp312-cp312-linux_x86_64.whl"

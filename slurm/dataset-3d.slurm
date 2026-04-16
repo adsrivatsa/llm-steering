@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64GB
+#SBATCH --mem=16GB
 #SBATCH --gpus-per-task=1
 #SBATCH --constraint=v100
 #SBATCH --time=24:00:00
