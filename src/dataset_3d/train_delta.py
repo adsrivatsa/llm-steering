@@ -85,9 +85,8 @@ def train(args):
             # Returns: [B, L, E]
             pred = torch.einsum('bld, dle -> ble', batch_D, DELTA)
             
-            # Flatten B and L for per-expert pairwise calculations
-            pred_flat = pred.view(-1, E)
-            target_flat = batch_target.view(-1, E)
+            pred_flat = pred.reshape(-1, E)
+            target_flat = batch_target.reshape(-1, E)
             
             loss = pairwise_ranking_loss(pred_flat, target_flat, margin=args.margin)
             
