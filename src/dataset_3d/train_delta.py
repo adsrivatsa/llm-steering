@@ -48,6 +48,19 @@ def pairwise_ranking_accuracy(pred, target):
         return correct.mean().item()
     return 0.0
 
+def topk_intersection(pred, target, k=5):
+    """
+    Computes the fraction of overlap in the Top-K experts between prediction and target.
+    """
+    _, pred_topk = torch.topk(pred, k, dim=-1)
+    _, target_topk = torch.topk(target, k, dim=-1)
+    
+    intersections = 0.0
+    for p, t in zip(pred_topk, target_topk):
+        intersections += len(set(p.tolist()).intersection(set(t.tolist()))) / k
+        
+    return intersections / pred.shape[0]
+
 def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Loading dataset from {args.dataset_path}")
@@ -96,6 +109,7 @@ def train(args):
     for epoch in range(args.epochs):
         epoch_loss = 0.0
         epoch_acc = 0.0
+        epoch_top5 = 0.0
         batches = 0
         
         pbar = tqdm(loader, desc=f"Epoch {epoch+1}/{args.epochs}")
@@ -124,23 +138,33 @@ def train(args):
             
             epoch_loss += loss.item()
             acc = pairwise_ranking_accuracy(pred_flat, target_flat)
+            top5_acc = topk_intersection(pred_flat, target_flat, k=5)
+            
             epoch_acc += acc
+            epoch_top5 += top5_acc
             batches += 1
             
-            
-            pbar.set_postfix({'loss': f"{loss.item():.4f}", 'acc': f"{acc:.4f}"})
+            pbar.set_postfix({'loss': f"{loss.item():.4f}", 'acc': f"{acc:.4f}", 'top5': f"{top5_acc:.4f}"})
             if _WANDB_AVAILABLE and wandb.run is not None:
-                wandb.log({"batch_loss": loss.item(), "batch_rank_loss": loss_rank.item(), "batch_mse_loss": loss_mse.item(), "batch_acc": acc})
+                wandb.log({
+                    "batch_loss": loss.item(), 
+                    "batch_rank_loss": loss_rank.item(), 
+                    "batch_mse_loss": loss_mse.item(), 
+                    "batch_acc": acc,
+                    "batch_top5_acc": top5_acc
+                })
             
         epoch_mean_loss = epoch_loss / batches
         epoch_mean_acc = epoch_acc / batches
-        print(f"Epoch {epoch+1} | Mean Loss: {epoch_mean_loss:.4f} | Mean Pairwise Acc: {epoch_mean_acc:.4f}")
+        epoch_mean_top5 = epoch_top5 / batches
+        print(f"Epoch {epoch+1} | Mean Loss: {epoch_mean_loss:.4f} | Mean Pairwise Acc: {epoch_mean_acc:.4f} | Top-5 Overlap: {epoch_mean_top5:.4f}")
         
         if _WANDB_AVAILABLE and wandb.run is not None:
             wandb.log({
                 "epoch": epoch + 1,
                 "epoch_loss": epoch_mean_loss,
-                "epoch_acc": epoch_mean_acc
+                "epoch_acc": epoch_mean_acc,
+                "epoch_top5_acc": epoch_mean_top5
             })
         
         
