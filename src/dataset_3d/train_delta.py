@@ -14,17 +14,31 @@ except ImportError:
     wandb = None
     _WANDB_AVAILABLE = False
 
-def pairwise_ranking_loss(pred, target):
+def pairwise_ranking_loss(pred, target, top_k=8):
     """
     Computes pairwise ranking loss using the target's actual difference as the dynamic margin.
-    This guarantees perfectly matching the scale and intervals of the rank.
+    Restricts the ranking objective to ONLY care about the Top-K most positive and Top-K most negative experts.
     pred: [batch, experts]
     target: [batch, experts]
     """
     p_diff = pred.unsqueeze(2) - pred.unsqueeze(1)
     t_diff = target.unsqueeze(2) - target.unsqueeze(1)
     
-    mask = t_diff > 1e-5  # threshold to ignore ties
+    B, E = target.shape
+    k = min(top_k, E // 2)
+    
+    # Identify the truly important experts (highest active shift, highest deactivated shift)
+    _, top_indices = torch.topk(target, k, dim=-1)
+    _, bottom_indices = torch.topk(target, k, dim=-1, largest=False)
+    
+    important_mask = torch.zeros_like(target, dtype=torch.bool)
+    important_mask.scatter_(1, top_indices, True)
+    important_mask.scatter_(1, bottom_indices, True)
+    
+    # Pair is evaluated if AT LEAST ONE of the experts is important
+    pair_mask = important_mask.unsqueeze(2) | important_mask.unsqueeze(1)
+    
+    mask = (t_diff > 1e-5) & pair_mask
     
     # Enforce that predicted rank difference is at least exactly the target difference
     loss_tensor = torch.relu(t_diff - p_diff)
@@ -35,14 +49,26 @@ def pairwise_ranking_loss(pred, target):
     else:
         return torch.tensor(0.0, device=pred.device, requires_grad=True)
 
-def pairwise_ranking_accuracy(pred, target):
+def pairwise_ranking_accuracy(pred, target, top_k=8):
     """
-    Computes accuracy of the pairwise rankings.
+    Computes accuracy of the pairwise rankings, focused only on Top-K & Bottom-K.
     """
     p_diff = pred.unsqueeze(2) - pred.unsqueeze(1)
     t_diff = target.unsqueeze(2) - target.unsqueeze(1)
     
-    mask = t_diff > 1e-5
+    B, E = target.shape
+    k = min(top_k, E // 2)
+    
+    _, top_indices = torch.topk(target, k, dim=-1)
+    _, bottom_indices = torch.topk(target, k, dim=-1, largest=False)
+    
+    important_mask = torch.zeros_like(target, dtype=torch.bool)
+    important_mask.scatter_(1, top_indices, True)
+    important_mask.scatter_(1, bottom_indices, True)
+    
+    pair_mask = important_mask.unsqueeze(2) | important_mask.unsqueeze(1)
+    
+    mask = (t_diff > 1e-5) & pair_mask
     correct = (p_diff[mask] > 0).float()
     if correct.numel() > 0:
         return correct.mean().item()
@@ -127,8 +153,8 @@ def train(args):
             target_flat = batch_target.reshape(-1, E)
             
             # Combine Pairwise Ranking and Mean Squared Error 
-            # to guarantee the scale and values closely align while preserving extreme ranks
-            loss_rank = pairwise_ranking_loss(pred_flat, target_flat)
+            # to guarantee the scale aligns while preserving extreme ranks of top/bottom K
+            loss_rank = pairwise_ranking_loss(pred_flat, target_flat, top_k=args.top_k)
             loss_mse = F.mse_loss(pred_flat, target_flat)
             loss = loss_rank + loss_mse
             
@@ -137,7 +163,7 @@ def train(args):
             optimizer.step()
             
             epoch_loss += loss.item()
-            acc = pairwise_ranking_accuracy(pred_flat, target_flat)
+            acc = pairwise_ranking_accuracy(pred_flat, target_flat, top_k=args.top_k)
             top5_acc = topk_intersection(pred_flat, target_flat, k=5)
             
             epoch_acc += acc
@@ -183,6 +209,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--top-k", type=int, default=8, help="Number of Top/Bottom experts to rank. Default 8.")
     parser.add_argument("--margin", type=float, default=0.05, help="Legacy margin arg")
     args = parser.parse_args()
     train(args)
