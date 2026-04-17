@@ -6,6 +6,14 @@ import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 from tqdm import tqdm
 
+try:
+    import wandb
+    _WANDB_AVAILABLE = True
+except ImportError:
+    wandb = None
+    _WANDB_AVAILABLE = False
+
+
 def pairwise_ranking_loss(pred, target, margin=0.05):
     """
     Computes pairwise ranking loss.
@@ -68,6 +76,19 @@ def train(args):
     DELTA = nn.Parameter(torch.randn(D_dim, L, E, device=device) * 0.01)
     optimizer = optim.Adam([DELTA], lr=args.lr, weight_decay=args.weight_decay)
     
+    if _WANDB_AVAILABLE and os.environ.get("WANDB_API_KEY"):
+        wandb.init(
+            project="tokenaware-steering-moe",
+            entity=os.environ.get("WANDB_ENTITY", "VLAvengers"),
+            group="train_delta",
+            name=f"train-delta-{args.epochs}ep-{args.batch_size}bs",
+            config=vars(args)
+        )
+        wandb.config.update({"samples": S, "layers": L, "hidden_dim": D_dim, "experts": E})
+        print("W&B initialized")
+    else:
+        print("W&B not available or WANDB_API_KEY not set. Skipping logging.")
+
     print(f"Starting training on {device}...")
     for epoch in range(args.epochs):
         epoch_loss = 0.0
@@ -99,13 +120,29 @@ def train(args):
             epoch_acc += acc
             batches += 1
             
-            pbar.set_postfix({'loss': f"{loss.item():.4f}", 'acc': f"{acc:.4f}"})
             
-        print(f"Epoch {epoch+1} | Mean Loss: {epoch_loss/batches:.4f} | Mean Pairwise Acc: {epoch_acc/batches:.4f}")
+            pbar.set_postfix({'loss': f"{loss.item():.4f}", 'acc': f"{acc:.4f}"})
+            if _WANDB_AVAILABLE and wandb.run is not None:
+                wandb.log({"batch_loss": loss.item(), "batch_acc": acc})
+            
+        epoch_mean_loss = epoch_loss / batches
+        epoch_mean_acc = epoch_acc / batches
+        print(f"Epoch {epoch+1} | Mean Loss: {epoch_mean_loss:.4f} | Mean Pairwise Acc: {epoch_mean_acc:.4f}")
+        
+        if _WANDB_AVAILABLE and wandb.run is not None:
+            wandb.log({
+                "epoch": epoch + 1,
+                "epoch_loss": epoch_mean_loss,
+                "epoch_acc": epoch_mean_acc
+            })
+        
         
     os.makedirs(os.path.dirname(args.output_path), exist_ok=True)
     torch.save(DELTA.detach().cpu(), args.output_path)
     print(f"Saved trained 3D DELTA of shape {tuple(DELTA.shape)} to {args.output_path}")
+
+    if _WANDB_AVAILABLE and wandb.run is not None:
+        wandb.finish()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train 3D DELTA tensor using Rank Regression")
