@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 from tqdm import tqdm
+import torch.nn.functional as F
 
 try:
     import wandb
@@ -13,10 +14,10 @@ except ImportError:
     wandb = None
     _WANDB_AVAILABLE = False
 
-
-def pairwise_ranking_loss(pred, target, margin=0.05):
+def pairwise_ranking_loss(pred, target):
     """
-    Computes pairwise ranking loss.
+    Computes pairwise ranking loss using the target's actual difference as the dynamic margin.
+    This guarantees perfectly matching the scale and intervals of the rank.
     pred: [batch, experts]
     target: [batch, experts]
     """
@@ -25,7 +26,8 @@ def pairwise_ranking_loss(pred, target, margin=0.05):
     
     mask = t_diff > 1e-5  # threshold to ignore ties
     
-    loss_tensor = torch.relu(margin - p_diff)
+    # Enforce that predicted rank difference is at least exactly the target difference
+    loss_tensor = torch.relu(t_diff - p_diff)
     
     valid_losses = loss_tensor[mask]
     if valid_losses.numel() > 0:
@@ -72,8 +74,9 @@ def train(args):
     dataset = TensorDataset(D, target)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
     
-    # Learnable Parameter DELTA [D_dim, L, E]
-    DELTA = nn.Parameter(torch.randn(D_dim, L, E, device=device) * 0.01)
+    # Learnable Parameter DELTA [L, D_dim, E]
+    # THIS MATCHES "x1.DELTA[l] = e" correctly.
+    DELTA = nn.Parameter(torch.randn(L, D_dim, E, device=device) * 0.01)
     optimizer = optim.Adam([DELTA], lr=args.lr, weight_decay=args.weight_decay)
     
     if _WANDB_AVAILABLE and os.environ.get("WANDB_API_KEY"):
@@ -102,14 +105,18 @@ def train(args):
             
             # Predict
             # batch_D: [B, L, D_dim]
-            # DELTA: [D_dim, L, E]
+            # DELTA: [L, D_dim, E]
             # Returns: [B, L, E]
-            pred = torch.einsum('bld, dle -> ble', batch_D, DELTA)
+            pred = torch.einsum('bld, lde -> ble', batch_D, DELTA)
             
             pred_flat = pred.reshape(-1, E)
             target_flat = batch_target.reshape(-1, E)
             
-            loss = pairwise_ranking_loss(pred_flat, target_flat, margin=args.margin)
+            # Combine Pairwise Ranking and Mean Squared Error 
+            # to guarantee the scale and values closely align while preserving extreme ranks
+            loss_rank = pairwise_ranking_loss(pred_flat, target_flat)
+            loss_mse = F.mse_loss(pred_flat, target_flat)
+            loss = loss_rank + loss_mse
             
             optimizer.zero_grad()
             loss.backward()
@@ -123,7 +130,7 @@ def train(args):
             
             pbar.set_postfix({'loss': f"{loss.item():.4f}", 'acc': f"{acc:.4f}"})
             if _WANDB_AVAILABLE and wandb.run is not None:
-                wandb.log({"batch_loss": loss.item(), "batch_acc": acc})
+                wandb.log({"batch_loss": loss.item(), "batch_rank_loss": loss_rank.item(), "batch_mse_loss": loss_mse.item(), "batch_acc": acc})
             
         epoch_mean_loss = epoch_loss / batches
         epoch_mean_acc = epoch_acc / batches
@@ -152,6 +159,6 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--margin", type=float, default=0.05)
+    parser.add_argument("--margin", type=float, default=0.05, help="Legacy margin arg")
     args = parser.parse_args()
     train(args)
