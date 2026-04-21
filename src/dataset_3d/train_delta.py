@@ -111,12 +111,26 @@ def train(args):
     target = y1 - y2 # [S, L, E]
     
     dataset = TensorDataset(D, target)
-    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
     
-    # Learnable Parameter DELTA [L, D_dim, E]
-    # THIS MATCHES "x1.DELTA[l] = e" correctly.
-    DELTA = nn.Parameter(torch.randn(L, D_dim, E, device=device) * 0.01)
-    optimizer = optim.Adam([DELTA], lr=args.lr, weight_decay=args.weight_decay)
+    val_size = max(1, int(args.val_split * len(dataset))) if args.val_split > 0 else 0
+    train_size = len(dataset) - val_size
+    if val_size > 0:
+        train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
+    else:
+        train_dataset = dataset
+        val_dataset = None
+        
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    if val_dataset is not None:
+        val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
+    else:
+        val_loader = None
+    
+    # Learnable Projection W_proj [D_dim, k] and DELTA [k, L, E]
+    k = args.k
+    W_proj = nn.Parameter(torch.randn(D_dim, k, device=device) * 0.01)
+    DELTA = nn.Parameter(torch.randn(k, L, E, device=device) * 0.01)
+    optimizer = optim.Adam([W_proj, DELTA], lr=args.lr, weight_decay=args.weight_decay)
     
     if _WANDB_AVAILABLE and os.environ.get("WANDB_API_KEY"):
         wandb.init(
@@ -138,22 +152,21 @@ def train(args):
         epoch_top5 = 0.0
         batches = 0
         
-        pbar = tqdm(loader, desc=f"Epoch {epoch+1}/{args.epochs}")
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs} [Train]")
         for batch_D, batch_target in pbar:
             batch_D = batch_D.to(device)
             batch_target = batch_target.to(device)
             
             # Predict
             # batch_D: [B, L, D_dim]
-            # DELTA: [L, D_dim, E]
-            # Returns: [B, L, E]
-            pred = torch.einsum('bld, lde -> ble', batch_D, DELTA)
+            # W_proj: [D_dim, k]
+            # DELTA: [k, L, E]
+            d_proj = torch.einsum('bld, dk -> blk', batch_D, W_proj)
+            pred = torch.einsum('blk, kle -> ble', d_proj, DELTA)
             
             pred_flat = pred.reshape(-1, E)
             target_flat = batch_target.reshape(-1, E)
             
-            # Combine Pairwise Ranking and Mean Squared Error 
-            # to guarantee the scale aligns while preserving extreme ranks of top/bottom K
             loss_rank = pairwise_ranking_loss(pred_flat, target_flat, top_k=args.top_k)
             loss_mse = F.mse_loss(pred_flat, target_flat)
             loss = loss_rank + loss_mse
@@ -171,6 +184,7 @@ def train(args):
             batches += 1
             
             pbar.set_postfix({'loss': f"{loss.item():.4f}", 'acc': f"{acc:.4f}", 'top5': f"{top5_acc:.4f}"})
+            
             if _WANDB_AVAILABLE and wandb.run is not None:
                 wandb.log({
                     "batch_loss": loss.item(), 
@@ -180,23 +194,64 @@ def train(args):
                     "batch_top5_acc": top5_acc
                 })
             
-        epoch_mean_loss = epoch_loss / batches
-        epoch_mean_acc = epoch_acc / batches
-        epoch_mean_top5 = epoch_top5 / batches
-        print(f"Epoch {epoch+1} | Mean Loss: {epoch_mean_loss:.4f} | Mean Pairwise Acc: {epoch_mean_acc:.4f} | Top-5 Overlap: {epoch_mean_top5:.4f}")
+        epoch_mean_loss = epoch_loss / batches if batches > 0 else 0
+        epoch_mean_acc = epoch_acc / batches if batches > 0 else 0
+        epoch_mean_top5 = epoch_top5 / batches if batches > 0 else 0
+        
+        # Validation Phase
+        val_mean_loss = 0.0
+        val_mean_acc = 0.0
+        val_mean_top5 = 0.0
+        if val_loader is not None:
+            val_loss = 0.0
+            val_acc = 0.0
+            val_top5 = 0.0
+            val_batches = 0
+            with torch.no_grad():
+                for batch_D, batch_target in val_loader:
+                    batch_D = batch_D.to(device)
+                    batch_target = batch_target.to(device)
+                    
+                    d_proj = torch.einsum('bld, dk -> blk', batch_D, W_proj)
+                    pred = torch.einsum('blk, kle -> ble', d_proj, DELTA)
+                    
+                    pred_flat = pred.reshape(-1, E)
+                    target_flat = batch_target.reshape(-1, E)
+                    
+                    val_loss += (pairwise_ranking_loss(pred_flat, target_flat, top_k=args.top_k) + F.mse_loss(pred_flat, target_flat)).item()
+                    val_acc += pairwise_ranking_accuracy(pred_flat, target_flat, top_k=args.top_k)
+                    val_top5 += topk_intersection(pred_flat, target_flat, k=5)
+                    val_batches += 1
+            
+            val_mean_loss = val_loss / val_batches if val_batches > 0 else 0
+            val_mean_acc = val_acc / val_batches if val_batches > 0 else 0
+            val_mean_top5 = val_top5 / val_batches if val_batches > 0 else 0
+            
+            print(f"Epoch {epoch+1} | Train Loss: {epoch_mean_loss:.4f} | Train Acc: {epoch_mean_acc:.4f} | Val Loss: {val_mean_loss:.4f} | Val Acc: {val_mean_acc:.4f}")
+        else:
+            print(f"Epoch {epoch+1} | Mean Loss: {epoch_mean_loss:.4f} | Mean Pairwise Acc: {epoch_mean_acc:.4f} | Top-5 Overlap: {epoch_mean_top5:.4f}")
         
         if _WANDB_AVAILABLE and wandb.run is not None:
-            wandb.log({
+            log_dict = {
                 "epoch": epoch + 1,
                 "epoch_loss": epoch_mean_loss,
                 "epoch_acc": epoch_mean_acc,
                 "epoch_top5_acc": epoch_mean_top5
-            })
+            }
+            if val_loader is not None:
+                log_dict.update({
+                    "val_loss": val_mean_loss,
+                    "val_acc": val_mean_acc,
+                    "val_top5_acc": val_mean_top5
+                })
+            wandb.log(log_dict)
         
         
     os.makedirs(os.path.dirname(args.output_path), exist_ok=True)
-    torch.save(DELTA.detach().cpu(), args.output_path)
-    print(f"Saved trained 3D DELTA of shape {tuple(DELTA.shape)} to {args.output_path}")
+    # Combine W_proj and DELTA into the identical shape [L, D_dim, E] used during inference
+    FULL_DELTA = torch.einsum('dk, kle -> lde', W_proj, DELTA)
+    torch.save(FULL_DELTA.detach().cpu(), args.output_path)
+    print(f"Saved trained 3D DELTA of shape {tuple(FULL_DELTA.shape)} to {args.output_path}")
 
     if _WANDB_AVAILABLE and wandb.run is not None:
         wandb.finish()
@@ -211,5 +266,7 @@ if __name__ == "__main__":
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--top-k", type=int, default=8, help="Number of Top/Bottom experts to rank. Default 8.")
     parser.add_argument("--margin", type=float, default=0.05, help="Legacy margin arg")
+    parser.add_argument("--k", type=int, default=10, help="Hidden dimension for bottleneck (W_proj -> DELTA)")
+    parser.add_argument("--val-split", type=float, default=0.1, help="Fraction of data to use for validation")
     args = parser.parse_args()
     train(args)
