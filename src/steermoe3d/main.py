@@ -90,7 +90,7 @@ def main(
                 "model": model_name,
                 "experts_activated": n_activated,
                 "experts_deactivated": n_deactivated,
-                "task": "squad"
+                "task": task
             }
         )
 
