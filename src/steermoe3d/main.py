@@ -10,6 +10,7 @@ from src.benchmark import (
     faitheval_inconsistent,
     mctest,
     mquake,
+    squad,
 )
 
 # Crucial override to launch the new VLLM plugin mode we registered
@@ -129,9 +130,14 @@ def main(
         score = mctest.infer(llm=llm, checkpoint_dir=inference_dir, pass_name=pass_name, batch_size=4)
         print("mctest:", score)
 
+    elif task == "squad":
+        print("Running squad...")
+        score = squad.infer(llm=llm, checkpoint_dir=inference_dir, pass_name=pass_name, batch_size=4)
+        print("squad:", score)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--task", type=str, choices=["faithfulness"], default="faithfulness")
+    parser.add_argument("--task", type=str, choices=["faithfulness", "squad"], default="faithfulness")
     parser.add_argument("--llm", "--model", dest="model_name", type=str, default="allenai/OLMoE-1B-7B-0125-Instruct")
     # Instead of pulling activations_dir sequentially, we just pull the natively trained delta.pt
     parser.add_argument("--delta-path", type=str, required=True, help="Path to your trained_delta.pt file.")

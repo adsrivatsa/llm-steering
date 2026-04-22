@@ -93,3 +93,13 @@ class MCTest(Dataset):
 
     def __getitem__(self, idx: int):
         return self._hf_ds[idx]
+
+class SQuAD(Dataset):
+    def __init__(self) -> None:
+        self._hf_ds = load_dataset("squad", split="validation")
+
+    def __len__(self) -> int:
+        return len(self._hf_ds)
+
+    def __getitem__(self, idx: int):
+        return self._hf_ds[idx]
