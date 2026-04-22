@@ -84,8 +84,8 @@ def main(
         wandb.init(
             project="tokenaware-steering-moe",
             entity=os.environ.get("WANDB_ENTITY", "VLAvengers"),
-            group="squad_inference",
-            name=f"squad_{model_name.split('/')[-1]}_A{n_activated}_D{n_deactivated}",
+            group=f"{task}_inference",
+            name=f"{task}_{model_name.split('/')[-1]}_A{n_activated}_D{n_deactivated}",
             config={
                 "model": model_name,
                 "experts_activated": n_activated,
