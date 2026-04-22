@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --account=robinjia_1822
-#SBATCH --job-name=collect-olmoe-toksteermoe-inference
+#SBATCH --job-name=collect-gpt-toksteermoe-inference
 #SBATCH --output=logs/%x-%A_%a.out
 #SBATCH --error=logs/%x-%A_%a.err
 #SBATCH --nodes=1
