@@ -138,15 +138,11 @@ def main(
         print("mctest:", score)
 
     elif task == "squad":
-        print("Running squad...")
-        score = squad.infer(llm=llm, checkpoint_dir=inference_dir, pass_name=pass_name, batch_size=4)
-        print("squad:", score)
-        
         if _WANDB_AVAILABLE and os.environ.get("WANDB_API_KEY"):
             wandb.init(
                 project="tokenaware-steering-moe",
                 entity=os.environ.get("WANDB_ENTITY", "VLAvengers"),
-                group="squad_inference", # the user requested squad_interface but inference makes more sense, I will use squad_inference
+                group="squad_inference",
                 name=f"squad_{model_name.split('/')[-1]}_A{n_activated}_D{n_deactivated}",
                 config={
                     "model": model_name,
@@ -155,6 +151,12 @@ def main(
                     "task": "squad"
                 }
             )
+
+        print("Running squad...")
+        score = squad.infer(llm=llm, checkpoint_dir=inference_dir, pass_name=pass_name, batch_size=4)
+        print("squad:", score)
+        
+        if _WANDB_AVAILABLE and os.environ.get("WANDB_API_KEY") and wandb.run is not None:
             wandb.log({
                 "squad_exact_match": score["exact_match"],
                 "squad_f1": score["f1"],
