@@ -3,6 +3,13 @@ import os
 import torch
 from transformers import AutoConfig
 
+try:
+    import wandb
+    _WANDB_AVAILABLE = True
+except ImportError:
+    wandb = None
+    _WANDB_AVAILABLE = False
+
 from src.benchmark import (
     cf_trivia_qa,
     faitheval_counterfactual,
@@ -134,6 +141,27 @@ def main(
         print("Running squad...")
         score = squad.infer(llm=llm, checkpoint_dir=inference_dir, pass_name=pass_name, batch_size=4)
         print("squad:", score)
+        
+        if _WANDB_AVAILABLE and os.environ.get("WANDB_API_KEY"):
+            wandb.init(
+                project="tokenaware-steering-moe",
+                entity=os.environ.get("WANDB_ENTITY", "VLAvengers"),
+                group="squad_inference", # the user requested squad_interface but inference makes more sense, I will use squad_inference
+                name=f"squad_{model_name.split('/')[-1]}_A{n_activated}_D{n_deactivated}",
+                config={
+                    "model": model_name,
+                    "experts_activated": n_activated,
+                    "experts_deactivated": n_deactivated,
+                    "task": "squad"
+                }
+            )
+            wandb.log({
+                "squad_exact_match": score["exact_match"],
+                "squad_f1": score["f1"],
+                "experts_activated": n_activated,
+                "experts_deactivated": n_deactivated
+            })
+            wandb.finish()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
