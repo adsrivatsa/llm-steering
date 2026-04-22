@@ -15,7 +15,7 @@ mkdir -p "logs"
 
 echo "Submitting 25-job array for SQuAD inference to SLURM..."
 JOB_ID=$(sbatch --parsable \
-    --export=ALL,MODEL_KEY="${MODEL_KEY}",DELTA_PATH="${DELTA_PATH}",INFERENCE_DIR="${INFERENCE_DIR}" \
+    --export=ALL,MODEL_KEY="${MODEL_KEY}",DELTA_PATH="${DELTA_PATH}",INFERENCE_DIR="${INFERENCE_DIR}",WANDB_API_KEY="${WANDB_API_KEY}",HF_TOKEN="${HF_TOKEN}" \
     slurm/steermoe3d_inference_squad.slurm)
 
 echo "✅ Array job submitted: ${JOB_ID}"
