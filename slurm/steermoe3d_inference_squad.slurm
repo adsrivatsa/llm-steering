@@ -38,7 +38,7 @@ export PATH="$HOME/miniconda/bin:$PATH"
 source "$HOME/miniconda/etc/profile.d/conda.sh"
 conda activate llm_steering
 
-conda run -n llm_steering python -u src/steermoe3d/main.py \
+conda run -n llm_steering python -u -m src.steermoe3d.main \
     --task squad \
     --llm "$MODEL_KEY" \
     --delta-path "$DELTA_PATH" \
