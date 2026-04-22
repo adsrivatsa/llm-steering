@@ -79,6 +79,21 @@ def main(
     n_activated: int,
     n_deactivated: int,
 ):
+
+    if _WANDB_AVAILABLE and os.environ.get("WANDB_API_KEY"):
+        wandb.init(
+            project="tokenaware-steering-moe",
+            entity=os.environ.get("WANDB_ENTITY", "VLAvengers"),
+            group="squad_inference",
+            name=f"squad_{model_name.split('/')[-1]}_A{n_activated}_D{n_deactivated}",
+            config={
+                "model": model_name,
+                "experts_activated": n_activated,
+                "experts_deactivated": n_deactivated,
+                "task": "squad"
+            }
+        )
+
     register_vllm_models()
 
     tp, pp = resolve_parallelism(model_name)
@@ -138,19 +153,6 @@ def main(
         print("mctest:", score)
 
     elif task == "squad":
-        if _WANDB_AVAILABLE and os.environ.get("WANDB_API_KEY"):
-            wandb.init(
-                project="tokenaware-steering-moe",
-                entity=os.environ.get("WANDB_ENTITY", "VLAvengers"),
-                group="squad_inference",
-                name=f"squad_{model_name.split('/')[-1]}_A{n_activated}_D{n_deactivated}",
-                config={
-                    "model": model_name,
-                    "experts_activated": n_activated,
-                    "experts_deactivated": n_deactivated,
-                    "task": "squad"
-                }
-            )
 
         print("Running squad...")
         score = squad.infer(llm=llm, checkpoint_dir=inference_dir, pass_name=pass_name, batch_size=4)
