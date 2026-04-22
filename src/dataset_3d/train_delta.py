@@ -74,6 +74,30 @@ def pairwise_ranking_accuracy(pred, target, top_k=8):
         return correct.mean().item()
     return 0.0
 
+def top_bottom_pairwise_accuracy(pred, target, top_k=8):
+    """
+    Computes pairwise accuracy ONLY for pairs consisting of (Top-K active, Bottom-K deactivated).
+    Checks if the model correctly ranks the true top experts above the true bottom experts.
+    """
+    p_diff = pred.unsqueeze(2) - pred.unsqueeze(1)
+    
+    _, E = target.shape
+    k = min(top_k, E // 2)
+    
+    _, top_indices = torch.topk(target, k, dim=-1)
+    _, bottom_indices = torch.topk(target, k, dim=-1, largest=False)
+    
+    top_mask = torch.zeros_like(target, dtype=torch.bool).scatter_(1, top_indices, True)
+    bottom_mask = torch.zeros_like(target, dtype=torch.bool).scatter_(1, bottom_indices, True)
+    
+    # We only care about pairs where element 1 is a top expert and element 2 is a bottom expert
+    pair_mask = top_mask.unsqueeze(2) & bottom_mask.unsqueeze(1)
+    
+    correct = (p_diff[pair_mask] > 0).float()
+    if correct.numel() > 0:
+        return correct.mean().item()
+    return 0.0
+
 def topk_intersection(pred, target, k=5):
     """
     Computes the fraction of overlap in the Top-K experts between prediction and target.
@@ -205,29 +229,68 @@ def train(args):
         if val_loader is not None:
             val_loss = 0.0
             val_acc = 0.0
+            val_top_bot_acc = 0.0
+            val_sign_acc = 0.0
             val_top5 = 0.0
             val_batches = 0
+            
+            val_top1_shift = 0.0
+            val_bot1_shift = 0.0
+            
+            # For magnitude ratio
+            pred_mag_sum = 0.0
+            target_mag_sum = 0.0
+            
+            # For per-layer magnitude tracking: [L]
+            layer_pred_mags = torch.zeros(L, device=device)
+            
             with torch.no_grad():
                 for batch_D, batch_target in val_loader:
                     batch_D = batch_D.to(device)
                     batch_target = batch_target.to(device)
                     
                     d_proj = torch.einsum('bld, dk -> blk', batch_D, W_proj)
-                    pred = torch.einsum('blk, kle -> ble', d_proj, DELTA)
+                    pred = torch.einsum('blk, kle -> ble', d_proj, DELTA) # pred: [B, L, E]
                     
                     pred_flat = pred.reshape(-1, E)
                     target_flat = batch_target.reshape(-1, E)
                     
                     val_loss += (pairwise_ranking_loss(pred_flat, target_flat, top_k=args.top_k) + F.mse_loss(pred_flat, target_flat)).item()
                     val_acc += pairwise_ranking_accuracy(pred_flat, target_flat, top_k=args.top_k)
+                    val_top_bot_acc += top_bottom_pairwise_accuracy(pred_flat, target_flat, top_k=args.top_k)
+                    val_sign_acc += (pred_flat.sign() == target_flat.sign()).float().mean().item()
                     val_top5 += topk_intersection(pred_flat, target_flat, k=5)
+                    
+                    # Target top1 and bot1 indices out of experts
+                    _, top1_idx = torch.max(target_flat, dim=-1, keepdim=True)
+                    _, bot1_idx = torch.min(target_flat, dim=-1, keepdim=True)
+                    
+                    val_top1_shift += torch.gather(pred_flat, -1, top1_idx).mean().item()
+                    val_bot1_shift += torch.gather(pred_flat, -1, bot1_idx).mean().item()
+                    
+                    pred_mag_sum += pred_flat.abs().mean().item()
+                    target_mag_sum += target_flat.abs().mean().item()
+                    
+                    # Accumulate per-layer average magnitude: pred is [B, L, E]
+                    # .abs().mean(dim=(0,2)) computes the mean over Batch and Experts for each layer
+                    layer_pred_mags += pred.abs().mean(dim=(0, 2))
+                    
                     val_batches += 1
             
             val_mean_loss = val_loss / val_batches if val_batches > 0 else 0
             val_mean_acc = val_acc / val_batches if val_batches > 0 else 0
+            val_mean_top_bot_acc = val_top_bot_acc / val_batches if val_batches > 0 else 0
+            val_mean_sign_acc = val_sign_acc / val_batches if val_batches > 0 else 0
             val_mean_top5 = val_top5 / val_batches if val_batches > 0 else 0
             
-            print(f"Epoch {epoch+1} | Train Loss: {epoch_mean_loss:.4f} | Train Acc: {epoch_mean_acc:.4f} | Val Loss: {val_mean_loss:.4f} | Val Acc: {val_mean_acc:.4f}")
+            val_mean_top1_shift = val_top1_shift / val_batches if val_batches > 0 else 0
+            val_mean_bot1_shift = val_bot1_shift / val_batches if val_batches > 0 else 0
+            
+            val_mean_mag_ratio = (pred_mag_sum / target_mag_sum) if target_mag_sum > 0 else 0
+            val_layer_mags = (layer_pred_mags / val_batches).tolist() if val_batches > 0 else [0]*L
+            
+            print(f"Epoch {epoch+1} | Train Loss: {epoch_mean_loss:.4f} | Val Loss: {val_mean_loss:.4f} | Val TB-Acc: {val_mean_top_bot_acc:.4f} | Val Sign: {val_mean_sign_acc:.4f} | Val Mag Ratio: {val_mean_mag_ratio:.4f}")
+            print(f"            | Top-1 Avg Shift: {val_mean_top1_shift:.4f} | Bot-1 Avg Shift: {val_mean_bot1_shift:.4f}")
         else:
             print(f"Epoch {epoch+1} | Mean Loss: {epoch_mean_loss:.4f} | Mean Pairwise Acc: {epoch_mean_acc:.4f} | Top-5 Overlap: {epoch_mean_top5:.4f}")
         
@@ -242,8 +305,17 @@ def train(args):
                 log_dict.update({
                     "val_loss": val_mean_loss,
                     "val_acc": val_mean_acc,
-                    "val_top5_acc": val_mean_top5
+                    "val_top_bot_acc": val_mean_top_bot_acc,
+                    "val_sign_acc": val_mean_sign_acc,
+                    "val_top5_acc": val_mean_top5,
+                    "val_mag_ratio": val_mean_mag_ratio,
+                    "val_top1_avg_shift": val_mean_top1_shift,
+                    "val_bot1_avg_shift": val_mean_bot1_shift
                 })
+                # Log per-layer shift magnitudes securely
+                for l_idx, l_mag in enumerate(val_layer_mags):
+                    log_dict[f"val_layer_{l_idx}_mean_shift"] = l_mag
+                    
             wandb.log(log_dict)
         
         
