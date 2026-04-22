@@ -80,23 +80,10 @@ def main(
     n_deactivated: int,
 ):
 
-    if _WANDB_AVAILABLE and os.environ.get("WANDB_API_KEY"):
-        wandb.init(
-            project="tokenaware-steering-moe",
-            entity=os.environ.get("WANDB_ENTITY", "VLAvengers"),
-            group=f"{task}_inference",
-            name=f"{task}_{model_name.split('/')[-1]}_A{n_activated}_D{n_deactivated}",
-            config={
-                "model": model_name,
-                "experts_activated": n_activated,
-                "experts_deactivated": n_deactivated,
-                "task": task
-            }
-        )
-
     register_vllm_models()
 
     tp, pp = resolve_parallelism(model_name)
+    print(f"Parallelism: tensor_parallel_size={tp}, pipeline_parallel_size={pp}")
     print(f"Parallelism: tensor_parallel_size={tp}, pipeline_parallel_size={pp}")
 
     llm = LLM(
@@ -110,6 +97,20 @@ def main(
         enable_prefix_caching=False,
         trust_remote_code=True,
     )
+
+    if _WANDB_AVAILABLE and os.environ.get("WANDB_API_KEY"):
+        wandb.init(
+            project="tokenaware-steering-moe",
+            entity=os.environ.get("WANDB_ENTITY", "VLAvengers"),
+            group=f"{task}_inference",
+            name=f"{task}_{model_name.split('/')[-1]}_A{n_activated}_D{n_deactivated}",
+            config={
+                "model": model_name,
+                "experts_activated": n_activated,
+                "experts_deactivated": n_deactivated,
+                "task": task
+            }
+        )
 
     if not os.path.exists(delta_path):
         raise FileNotFoundError(f"Trained 3D DELTA tensor not found at {delta_path}!")
