@@ -182,7 +182,7 @@ Loaded dynamically at runtime by dataset classes in `src/benchmark/dataset.py` a
 - MQuAKE datasets from Princeton NLP GitHub
 - MCTest parquet splits from Hugging Face
 
-## Notes for TA Review
+## Misc Notes
 
 - Inference is resumable: each benchmark appends to partially completed JSONL outputs.
 - Activation collection is checkpointed (`checkpoint.INTERVAL = 50`).
