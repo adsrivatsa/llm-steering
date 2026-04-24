@@ -42,7 +42,7 @@ cd llm-steering
 uv sync
 ```
 
-### 3) Required Local Wheel
+### 3) Required Local Wheel (only for CARC because of Rocky Linux)
 
 This repository expects a local wheel source for vLLM:
 
