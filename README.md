@@ -30,7 +30,7 @@ This repository contains the implementation of risk-scaled and token-aware steer
 
 - OS: Linux (required for the pinned local vLLM wheel in `pyproject.toml`).
 - Python: `3.12.x`
-- CUDA GPU: required for practical runs.
+- CUDA GPU: required for practical runs. We used L40S/A40 on CARC.
 - Disk/network: enough to cache model weights and benchmark datasets.
 
 ### 2) Create Environment
@@ -39,9 +39,7 @@ This repository contains the implementation of risk-scaled and token-aware steer
 git clone https://github.com/adsrivatsa/llm-steering
 cd llm-steering
 
-uv venv
-source .venv/bin/activate
-uv pip install -e .
+uv sync
 ```
 
 ### 3) Required Local Wheel
