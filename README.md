@@ -14,11 +14,6 @@ This repository contains the implementation of risk-scaled and token-aware steer
 - Evaluation on six faithfulness benchmarks.
 - Heatmap visualization over `(experts_activated, experts_deactivated)` sweeps.
 
-## TA Submission Information
-
-- Public repository URL: `https://github.com/adsrivatsa/llm-steering`
-- Code-only submission deadline: **May 3, 11:59 PM**
-
 ## Repository Structure
 
 - `src/activation/`: collects routing activations and saves checkpoints.
